@@ -13,10 +13,13 @@ sm_86 架构门、GA106 48KB 静态共享内存上限适配、nvfp4/fp8-w4a4 编
 | 路径 | 内容 |
 |---|---|
 | `src/`, `include/` | 引擎源码 (CUDA/C++) |
+| `cmake/` | CMake 模块（依赖解析 / 目标定义，构建必需） |
+| `ffmpeg/` | FFmpeg 开发件（headers + import libs，media decode 链接必需；已入库） |
 | `apps/` | CLI / serve / perplexity 三个可执行目标 |
 | `bench/`, `eval/` | 基准与评测工具 |
 | `docs/` | 产品与维护者文档；`docs/ARTIFACT_NOTES.md` 为本分支特有的工件溯源说明；`docs/conversion/` 为模型转换文档集（含自 sister 仓库归档的 4 篇） |
-| `models/` | 修改后的 `.ninfer` 制品本地存放目录（`*.ninfer` 不入库，仅 `.gitkeep` 提交） |
+| `models/` | 修改后的 `.ninfer` 制品本地存放目录（制品不入库，见 `models/README.md`） |
+| `dist/apps/` | 预编译交付物（3 exe + 9 DLL，**不入库**；从 `E:\download\123\ninfer-3060-win\bin\` 拷入，启动器默认扫描此目录） |
 | `scripts/` | Windows 构建驱动（开发机）：`build_sm86.bat`(交付构建) 等 |
 | `tools/splice_ternary.py` | 从 GGUF 重建三值化核心的离线脚本（工件再生用） |
 
@@ -41,6 +44,7 @@ sm_86 架构门、GA106 48KB 静态共享内存上限适配、nvfp4/fp8-w4a4 编
 ## 从源码构建（sm_86 交付构建）
 
 前置：Windows + Visual Studio 2022 Build Tools (cl) + CMake + Ninja + CUDA 13.1。
+仓库已自带 `cmake/` 与 `ffmpeg/{include,lib}`（media decode 链接用），无需另找依赖。
 
 ```bat
 cmake -B build_86 -G Ninja -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release
