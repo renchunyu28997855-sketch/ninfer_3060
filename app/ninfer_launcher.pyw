@@ -396,7 +396,6 @@ PARAM_SPECS = [
     ("prefill_chunk",    "ps_chunk",         "int",    "--prefill-chunk"),
     ("kv_capacity",      "ps_kvcap", "str",    "--kv-capacity"),
     ("kv_dtype",         "ps_kvdtype",               "choice", "--kv-dtype", ["bf16", "int8", "fp8", "nvfp4", "k8v4"]),
-    ("kv_sink",          "ps_kvsink",                 "int",    "--kv-sink"),
     ("device",           "ps_device",                "int",    "--device"),
     # 多 identity 容器里选择对外模型名（如官方卡的 base / dflash2）；留空 = 容器默认
     ("model_id",         "ps_modelid",               "str",    "--model-id"),
@@ -432,7 +431,6 @@ PLACEHOLDERS = {
     "pending_timeout_ms": "ph_30000",
     "prefill_chunk": "ph_chunk",
     "kv_capacity": "ph_auto",
-    "kv_sink": "2048",
     "device": "ph_0",
     "default_max_tokens": "ph_32768",
     "draft_tokens": "ph_draft",
@@ -494,8 +492,6 @@ ADVANCED_PARAM_SPECS = [
      "ds_privcont"),
     ("max_long_anchors_per_continuation", "ps_anchors", "int", "--max-long-anchors-per-continuation",
      "ds_anchors"),
-    ("max_cache_markers_per_request", "ps_markers", "int", "--max-cache-markers-per-request",
-     "ds_markers"),
     # 解码 / 投机 / 策略
     ("no_prefix_reuse",     "ps_nopfx",      "bool", "--no-prefix-reuse",
      "ds_nopfx"),
@@ -559,36 +555,17 @@ class Config:
         if spec not in ("mtp", "dflash", "dflash2"):
             skip_keys.add("draft_tokens")
             skip_keys.add("lm_head_draft")
+        # v3 serve 的 --spec 只接受 mtp/dflash/dflash2；“none”是启动器的关闭哨兵，不发射参数。
+        if spec == "none":
+            skip_keys.add("spec")
         # 上游：context-cache 容量选项与 --no-prefix-reuse 互斥；关闭前缀复用时跳过它们
         if d.get("no_prefix_reuse", False):
             skip_keys |= {"device_state_slots", "host_state_slots", "host_kv_mib",
                           "max_shared_prefixes", "max_private_continuations",
-                          "max_long_anchors_per_continuation",
-                          "max_cache_markers_per_request"}
-        # 工作集多态：off / 显式值 / auto / auto-fair / auto-elastic。分槽已停用（不再发射 --kv-slot-percentages）。
-        ws_auto    = bool(d.get("kv_working_set_auto"))
-        ws_fair    = bool(d.get("kv_ws_fair"))
-        ws_elastic = bool(d.get("kv_ws_elastic"))
-        try:
-            ws_val = int(d.get("kv_working_set") or 0)
-        except (TypeError, ValueError):
-            ws_val = 0
-        mode = "auto-fair" if ws_fair else ("auto-elastic" if ws_elastic
-                                           else ("auto" if ws_auto else "off"))
-        if mode != "off":
-            # auto 系：host 容量/sink 走 auto 自动定容（sink 仅在显式给出时传）。
-            skip_keys.add("kv_working_set")
-            skip_keys.add("kv_sink")
-            args += ["--kv-working-set", mode]
-            try:
-                sink_val = int(d.get("kv_sink") or 0)
-            except (TypeError, ValueError):
-                sink_val = 0
-            if sink_val > 0:
-                args += ["--kv-sink", str(sink_val)]
-        elif ws_val <= 0:
-            skip_keys.add("kv_working_set")
-            skip_keys.add("kv_sink")
+                          "max_long_anchors_per_continuation"}
+        # ninfer_3060 (v3 serve) 无 working-set 特性：旧配置残留的 kv_working_set* / kv_sink
+        # 键一律不发射参数（这些键已不在 PARAM_SPECS，不会出现在表单里）。
+        skip_keys |= {"kv_working_set", "kv_sink"}
         for spec_row in list(PARAM_SPECS) + list(ADVANCED_PARAM_SPECS):
             key, label, kind, flag = spec_row[:4]
             if not flag:
@@ -1075,7 +1052,7 @@ class MainWindow(QMainWindow):
             f.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         split_at = next(i for i, s in enumerate(PARAM_SPECS) if s[0] == "temperature")
         # kv_working_set 数字框已移除（被 auto/fair/elastic 三模式取代），只剩 kv_sink。
-        WS_KEYS = ("kv_sink",)
+        WS_KEYS = ()  # v3 引擎无 working-set；kv_sink 控件已移除
         groups = ([], [])
         ws_pairs = []
         for i, spec in enumerate(PARAM_SPECS):
@@ -1491,7 +1468,8 @@ class MainWindow(QMainWindow):
         import glob as _g
         for p in _g.glob(os.path.join(d, "ninfer-perplexity*.exe")):
             return p
-        for root in (os.path.join(PROJECT_ROOT, "build-v3", "apps"),
+        for root in (os.path.join(PROJECT_ROOT, "dist", "apps"),
+                     os.path.join(PROJECT_ROOT, "build-v3", "apps"),
                      os.path.join(PROJECT_ROOT, "build-new", "apps"),
                      os.path.join(PROJECT_ROOT, "build", "apps"),
                      os.path.join(PROJECT_ROOT, "windows-port", "v3"),

@@ -4,7 +4,7 @@
   "host": "127.0.0.1",
   "port": 8080,
   "max_context": 16384,
-  "kv_dtype": "fp8-e4m3-r256",
+  "kv_dtype": "fp8",
   "max_concurrency": 4,
   "spec": "none",
   "vision": true,
