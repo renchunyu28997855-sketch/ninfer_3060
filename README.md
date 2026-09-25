@@ -15,7 +15,8 @@ sm_86 架构门、GA106 48KB 静态共享内存上限适配、nvfp4/fp8-w4a4 编
 | `src/`, `include/` | 引擎源码 (CUDA/C++) |
 | `apps/` | CLI / serve / perplexity 三个可执行目标 |
 | `bench/`, `eval/` | 基准与评测工具 |
-| `docs/` | 产品与维护者文档；`docs/ARTIFACT_NOTES.md` 为本分支特有的工件溯源说明 |
+| `docs/` | 产品与维护者文档；`docs/ARTIFACT_NOTES.md` 为本分支特有的工件溯源说明；`docs/conversion/` 为模型转换文档集（含自 sister 仓库归档的 4 篇） |
+| `models/` | 修改后的 `.ninfer` 制品本地存放目录（`*.ninfer` 不入库，仅 `.gitkeep` 提交） |
 | `scripts/` | Windows 构建驱动（开发机）：`build_sm86.bat`(交付构建) 等 |
 | `tools/splice_ternary.py` | 从 GGUF 重建三值化核心的离线脚本（工件再生用） |
 

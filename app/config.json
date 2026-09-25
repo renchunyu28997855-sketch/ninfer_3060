@@ -13,5 +13,6 @@
   "temperature": 1.0,
   "top_p": 0.95,
   "default_max_tokens": 8192,
-  "_theme": "dark"
+  "_theme": "dark",
+  "ui_palette": "ocean"
 }

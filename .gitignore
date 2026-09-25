@@ -72,3 +72,4 @@ test_image.png
 .codegraph/
 stats/
 app/stats/
+models/*.ninfer
