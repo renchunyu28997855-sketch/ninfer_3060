@@ -1,0 +1,17 @@
+{
+  "_comment": "ninfer_3060 启动器配置。model 留空时在界面上从 models/ 目录选择（.ninfer 制品放该目录）；引擎 exe 在下拉框选择（自动扫描 dist/apps、*/bin）。",
+  "model": "",
+  "host": "127.0.0.1",
+  "port": 8080,
+  "max_context": 16384,
+  "kv_dtype": "fp8-e4m3-r256",
+  "max_concurrency": 4,
+  "spec": "none",
+  "vision": true,
+  "no_cuda_graph": false,
+  "no_prefix_reuse": false,
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "default_max_tokens": 8192,
+  "_theme": "dark"
+}

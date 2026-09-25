@@ -66,6 +66,22 @@ cmake --build build_86 -j 8
 长文 8.66 / 中文 7.89 / 代码 1.86），速率 ~1.4k tok/s。对比损坏工件的
 16.3–1e7，数值路径确认正确。最终需在真 3060 上过一遍完整推理。
 
+## GUI 启动器（app/）
+
+`app/ninfer_launcher.pyw`（PyQt6 托盘启动器，移植自上游配套启动器并适配本仓库布局）：
+托管 ninfer-serve.exe 启停、实时日志、参数表单（读写 `app/config.json`）、基准/案例测试页。
+
+```bat
+:: 依赖 Python 3.12 + PyQt6 + requests（本机已装于 ...
+:: C:\Users\sanbanfu\AppData\Local\Programs\Python\Python312）
+cd E:\<repo>
+start "" "C:\Users\sanbanfu\AppData\Local\Programs\Python\Python312\pythonw.exe" app\ninfer_launcher.pyw
+```
+
+界面选引擎 exe（自动扫描 `dist/apps/`、`build*/apps/`、`*/bin/`；exe 旁需同放 DLL）
+与模型（把 .ninfer 放到 `models/` 目录或手工填路径），Start 后 API 在 http://127.0.0.1:8080/v1。
+运行时统计落 `stats/`（已 gitignore）。
+
 ## 已知限制
 
 - 单二进制仅含 sm_86 SASS，不能在 5090/sm_120a 上运行（开发回归用
