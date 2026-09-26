@@ -4,8 +4,8 @@ Published measurements use one NVIDIA GeForce RTX 5090 through NInfer's public H
 
 This port ships four launcher profiles. Their measured figures, the exact argument set each one
 starts, and the interleaving rule behind the numbers are in the
-[README's Profiles and launchers section](../README.md#profiles-and-launchers). That table is the
-port's published performance claim, and `tools/release/profiles.py` is its only copy.
+[release notes' measured-profile table](../RELEASE_NOTES.md#what-runs). That table is the
+port's published performance claim.
 
 Read the [measurement and publication rules](performance/methodology.md) for workload definitions,
 metric formulas, statistics, comparison requirements, and the standard result-page format.

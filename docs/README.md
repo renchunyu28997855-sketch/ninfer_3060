@@ -73,6 +73,7 @@ other references own narrower contracts:
 | [Operational logging](maintainer/logging.md) | log ownership, presentation, severity and data policy |
 | [Linear benchmark](maintainer/linear-benchmark.md) | pure Linear measurement, metrics and suites |
 | [Linear tuning and reports](maintainer/linear-tuning.md) | tuning ranges, priority points, dispatch tradeoffs and final performance report format |
+| [Release gates](maintainer/release-gates.md) | 判据-style release checklist: build/test, artifact pinning, launcher/package rules, numerical sanity, measurement discipline, versioning |
 
 Model cards contain official artifact facts and source provenance. The
 [conversion guide](weight-conversion.md) is the entry point for making an artifact. Exact config

@@ -167,6 +167,10 @@ struct EngineOptions {
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
     bool use_cuda_graph                    = true;
+    // Opt-in aggressive WDDM memory budgeting against total VRAM on dedicated GPUs (Windows
+    // only): budgets runtime capacity from physical device capacity minus static weights and a
+    // minimum eviction floor, instead of the WDDM process budget reported by cudaMemGetInfo.
+    bool wddm_evictable_budget             = false;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;

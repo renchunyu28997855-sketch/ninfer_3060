@@ -16,3 +16,7 @@ add_library(ninfer_core STATIC
 ninfer_internal_includes(ninfer_core)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC CUDA::cudart CUDA::nvtx3 Threads::Threads)
+if(WIN32)
+  # WDDM residency lock (opt-in --wddm-evictable-budget) drives the D3D12/DXGI driver APIs.
+  target_link_libraries(ninfer_core PRIVATE d3d12 dxgi)
+endif()

@@ -1,6 +1,7 @@
 #include "runtime/engine/model_instance.h"
 #include "artifact/reader.h"
 #include "artifact/formats.h"
+#include "core/arena.h"
 #include "core/startup.h"
 #include "models/qwen3_5/load.h"
 #include "models/qwen3_5/measurement.h"
@@ -59,12 +60,45 @@ void validate_options(const EngineOptions& options) {
     }
 }
 
-std::size_t current_free_device_bytes() {
+std::size_t current_free_device_bytes(std::size_t weights_bytes = 0,
+                                     bool wddm_evictable_budget = false,
+                                     std::size_t planned_runtime_bytes = 0) {
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+#if defined(_WIN32)
+    if (wddm_evictable_budget && weights_bytes > 0) {
+        // Allow WDDM to evict background apps down to 512 MiB non-evictable DWM display floor.
+        constexpr std::size_t kMinDwmHeadroom = 512ULL * 1024ULL * 1024ULL;
+        if (total_bytes > weights_bytes + kMinDwmHeadroom) {
+            const std::size_t evictable_free = total_bytes - weights_bytes - kMinDwmHeadroom;
+            return std::max(free_bytes, evictable_free);
+        }
+    }
+    // The arena already owns the pre-flight budget, so free_bytes understates what the runtime
+    // may still place. Report the budget the arena was actually sized from.
+    if (wddm_evictable_budget && weights_bytes > 0 && planned_runtime_bytes > 0) {
+        return std::max(free_bytes, planned_runtime_bytes);
+    }
+#endif
     return free_bytes;
 }
+
+#if defined(_WIN32)
+// Opt-in WDDM budgeting preflight: total VRAM must cover the planned device footprint plus a
+// 512 MiB non-evictable display floor; otherwise the plain free-memory guard applies.
+void check_wddm_evictable_budget(std::size_t planned_device_bytes) {
+    constexpr std::size_t kMinDwmHeadroom = 512ULL * 1024ULL * 1024ULL;
+    std::size_t free_bytes  = 0;
+    std::size_t total_bytes = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    if (total_bytes > planned_device_bytes + kMinDwmHeadroom) { return; }
+    throw std::invalid_argument("model weights require " + std::to_string(planned_device_bytes) +
+                                " bytes of device memory, but only " +
+                                std::to_string(free_bytes) +
+                                " bytes are free before loading weights");
+}
+#endif
 
 } // namespace
 
@@ -155,6 +189,9 @@ ModelInstance::~ModelInstance() = default;
 
 ConstructedModel construct_model(const EngineOptions& options, DeviceContext& device) {
     validate_options(options);
+#if defined(_WIN32)
+    core::set_wddm_residency_lock_enabled(options.wddm_evictable_budget);
+#endif
     const auto start = Clock::now();
     StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
     artifact::Reader reader(options.artifact_path);
@@ -162,9 +199,15 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     StartupPhaseScope binding(options.startup_observer, StartupPhase::TargetPlan);
     auto plan = models::qwen3_5::plan_load(reader, models::load_options(options));
     binding.complete();
+#if defined(_WIN32)
+    if (options.wddm_evictable_budget) {
+        check_wddm_evictable_budget(plan.materialization().device_capacity_bytes);
+    }
+#endif
     auto model =
         models::qwen3_5::materialize_model(std::move(plan), device, &options.startup_observer);
     device.synchronize();
+    const std::size_t weights_bytes = model->storage_stats().h2d_bytes;
     StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
     auto instance = std::make_unique<ModelInstance>(std::move(model), options);
     frontend.complete();
@@ -177,7 +220,8 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
         options.context_cost.preset_path);
     auto planner    = models::qwen3_5::make_sequence_planner(instance->parameters, device, options);
     auto resolution = resolve_kv_capacity(options.kv_capacity, planner.capacity_curve(),
-                                          current_free_device_bytes());
+                                          current_free_device_bytes(
+                                              weights_bytes, options.wddm_evictable_budget));
     auto sequence   = std::move(planner).finalize(resolution.main_page_groups);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
         sequence.kv_capacity() != resolution.resolved_tokens) {
@@ -190,7 +234,8 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
                                                         device, options.startup_observer);
     device.synchronize();
     program.complete();
-    instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
+    instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes(
+        weights_bytes, options.wddm_evictable_budget, resolution.runtime_reservation_bytes);
     const auto& stats = instance->model->storage_stats();
     LoadSummary summary;
     summary.architecture = models::architecture_name(instance->model->config().text.architecture);

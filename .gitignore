@@ -7,3 +7,12 @@ models/*
 !models/README.md
 !models/.gitkeep
 stats/
+dist.rar
+build_120a/
+smoke/
+build_120a.log
+build_120a_outer.log
+build_incr.log
+build_incr_tmp.bat
+rebuild_120a.log
+serve_*.log

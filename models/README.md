@@ -28,6 +28,10 @@ python -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()
 :: 期望 6d8b62b5...（分块读取大文件时同上逻辑即可）
 ```
 
+- **`Ternary-Bonsai-2-27B-ninfer-v3-spliced-q4head.ninfer`**（若存在）
+  - 大小：**9,698,309,376 B**；2026-09-26 生成，PPL 未单独复测（spliced 参考值 5.628 仍作为量级基准）。
+  - 已在 5090 sm_120a 开发构建上通过 serve 冒烟：权重 6.70 GiB / 加载 ~5 s，greedy 输出连贯。
+
 ### 快速功能验证（~1 分钟，任意 GPU）
 
 ```bat
@@ -63,6 +67,14 @@ python tools\splice_ternary.py --base 官方.ninfer --gguf 模型.gguf --out mod
 
 参数与完整推导见 `tools/splice_ternary.py` 头部注释、`docs/ARTIFACT_NOTES.md`、
 `docs/conversion/03-三元模型转-NInfer.md`。
+
+## Spec 解码（--spec）
+
+引擎支持 `--spec mtp`（本件可用的唯一 lane，需修复后的 `gdn_input_proj` guard 顺序，
+见 commit 记录）；`--spec dflash`/`dflash2` 因本件不含对应伴随张量，启动时以
+`missing component dflash` 干净失败（预期行为，非损坏信号）。5090 实测（q4head 件，
+greedy，40-token 提示）：MTP draft=3 接受率 24/36 = 66.7%，decode ≈ 294 tok/s（关 spec 基线
+≈ 123 tok/s，同机窗口内对比）。交付档验收用 release-gates §4 的接受率区间判读。
 
 ## 显存预算（RTX 3060 12GB）
 

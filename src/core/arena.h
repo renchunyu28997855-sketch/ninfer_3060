@@ -110,4 +110,14 @@ private:
 
 using WorkspaceArena = DeviceArena;
 
+namespace core {
+#if defined(_WIN32)
+// WDDM residency lock: while enabled, DeviceArena backing allocations request D3D12
+// maximum residency priority with overbudget paging denied so the driver cannot evict the
+// arena's VRAM to back a concurrent desktop workload (Windows only, opt-in per process).
+void set_wddm_residency_lock_enabled(bool enabled) noexcept;
+[[nodiscard]] bool wddm_residency_lock_enabled() noexcept;
+#endif
+} // namespace core
+
 } // namespace ninfer
