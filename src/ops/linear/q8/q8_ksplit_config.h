@@ -45,11 +45,16 @@ struct Q8KSplitSchedule {
     static constexpr auto kActivationCache  = ActivationCache;
     static constexpr auto kWeightCache      = WeightCache;
     static constexpr auto kActivationStage  = ActivationStage;
-    static constexpr int kThreads           = KWarps * 32;
+    // Launch geometry must track the EFFECTIVE warp count: the sm_8x compat clamp shrinks every
+    // shared plane to kKWarps rows, so launching the full KWarps CTAs would index those planes
+    // out of bounds (illegal memory access on the first K-split stage).
+    static constexpr int kThreads           = kKWarps * 32;
     static constexpr int kTileKPerWarp      = 64;
-    static constexpr int kGroupK            = KWarps * kTileKPerWarp;
+    static constexpr int kGroupK            = kKWarps * kTileKPerWarp;
     static constexpr int kRowsPerCta        = 16;
-    static constexpr int kRowsPerLoaderWarp = kRowsPerCta / KWarps;
+    static_assert((kRowsPerCta % kKWarps) == 0,
+                  "Q8 K-split: every loader warp must own a whole number of output rows");
+    static constexpr int kRowsPerLoaderWarp = kRowsPerCta / kKWarps;
     static constexpr int kScaleBytesPerRow  = kGroupK / 16;
 };
 
