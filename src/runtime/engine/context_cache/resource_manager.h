@@ -1108,6 +1108,17 @@ public:
         out.backend_kv_d2h_seconds             = context_stats_.backend_kv_d2h_seconds;
         out.backend_kv_h2d_seconds             = context_stats_.backend_kv_h2d_seconds;
         out.backend_kv_d2d_seconds             = context_stats_.backend_kv_d2d_seconds;
+
+        const WorkingSetStats working_set = program.working_set_stats();
+        out.working_set_selections         = working_set.selections;
+        out.working_set_swaps              = working_set.swaps;
+        out.working_set_demoted_pages      = working_set.demoted_pages;
+        out.working_set_promoted_pages     = working_set.promoted_pages;
+        out.working_set_d2h_bytes          = working_set.d2h_bytes;
+        out.working_set_h2d_bytes          = working_set.h2d_bytes;
+        out.working_set_d2h_seconds        = working_set.d2h_seconds;
+        out.working_set_h2d_seconds        = working_set.h2d_seconds;
+        out.working_set_selection_seconds  = working_set.selection_seconds;
         out.pressure_spill_pages               = context_stats_.pressure_spill_pages;
         out.partial_tail_cow_pages             = context_stats_.partial_tail_cow_pages;
         out.pressure_private_owners_degraded   = context_stats_.pressure_private_owners_degraded;

@@ -316,6 +316,31 @@ void StartupLogRenderer::engine_ready(const LoadSummary& load) {
                          context_cost_preset_source_name(load.context_cost.transfer_source),
                          context_cost_preset_source_name(load.context_cost.prefill_source),
                          load.prefill_signature);
+    if (load.working_set_enabled) {
+        if (load.working_set_per_lane) {
+            std::string lanes;
+            for (std::size_t i = 0; i < load.working_set_lane_budget_tokens.size(); ++i) {
+                if (i != 0) { lanes += " "; }
+                lanes += format_pretty_count(load.working_set_lane_budget_tokens[i]);
+            }
+            impl_->logger->info(
+                "working set | sized-slots | {} lanes: {} | sink {}",
+                std::to_string(load.working_set_lane_budget_tokens.size()), lanes,
+                format_pretty_count(load.working_set_sink_tokens));
+        } else {
+            const char* ws_mode = !load.working_set_auto
+                                      ? "explicit"
+                                      : load.working_set_grant_mode == 1
+                                            ? "auto-fair"
+                                            : load.working_set_grant_mode == 2
+                                                  ? "auto-elastic"
+                                                  : "auto";
+            impl_->logger->info("working set | {} | budget {} | sink {}",
+                                ws_mode,
+                                format_pretty_count(load.working_set_budget_tokens),
+                                format_pretty_count(load.working_set_sink_tokens));
+        }
+    }
 }
 
 } // namespace ninfer::product

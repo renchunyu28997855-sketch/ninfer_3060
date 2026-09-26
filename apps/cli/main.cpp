@@ -281,7 +281,14 @@ int main(int argc, char** argv) {
         // consumer and must not reserve an extra Device StateImage or run terminal capture.
         engine_options.context_cache.enabled                = false;
         engine_options.context_cache.host_state_slots       = 0;
-        engine_options.context_cache.host_kv_capacity_bytes = 0;
+        // Cross-request context caching stays off, but a nonzero host KV capacity is kept so the
+        // working set can park evicted blocks; 0 lets the engine auto-size it from max context.
+        engine_options.context_cache.host_kv_capacity_bytes = cli.kv_host_capacity;
+        engine_options.working_set.enabled                   = cli.kv_working_set != 0;
+        if (cli.kv_working_set != 0) {
+            engine_options.working_set.budget_tokens = cli.kv_working_set;
+            engine_options.working_set.sink_tokens   = cli.kv_sink;
+        }
         engine_options.startup_observer                     = startup_log.observer();
 
         ninfer::Engine engine(std::move(engine_options));

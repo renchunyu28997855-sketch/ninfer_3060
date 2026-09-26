@@ -941,6 +941,12 @@ public:
     [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
     [[nodiscard]] runtime::ProgramResourceRevision resource_revision() const noexcept;
     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
+    [[nodiscard]] WorkingSetStats working_set_stats() const noexcept;
+    [[nodiscard]] WorkingSetConfig working_set_config() const noexcept;
+    // Recompute a request's auto working-set grant from the current device pool and refresh its
+    // per-session budget plus text KV entitlement; called on every admission retry so queued
+    // requests pick up freed pages. No-op unless the working set is auto-sized.
+    void refresh_working_set_grant(RequestBasePlan& base) const noexcept;
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;
 

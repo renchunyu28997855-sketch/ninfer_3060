@@ -25,6 +25,12 @@ struct Options {
     std::uint32_t prefill_chunk  = 1024;
     int device                   = 0;
 
+    // Long-context working set: keep a block-aligned token budget of history resident in the
+    // device KV row and park the rest on pinned host memory. 0 = off (dense row, today's path).
+    std::uint32_t kv_working_set = 0;
+    std::uint32_t kv_sink        = 2048; // always-resident leading tokens
+    std::uint64_t kv_host_capacity = 0;  // host KV pool bytes; 0 = auto-size
+
     KvCacheStorage kv_cache = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     bool enable_vision  = false;

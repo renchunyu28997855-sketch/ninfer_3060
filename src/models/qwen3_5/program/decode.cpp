@@ -304,8 +304,20 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         submit_range.emplace(nvtx::Name::DecodeOrdinarySubmit, nvtx::Category::Decode,
                              static_cast<std::uint64_t>(lanes.size()));
         DecodeGraphExecutable* executable = nullptr;
-        ops::CausalAttentionExecutionEnvelope envelope{maximum_frontier + 1, maximum_frontier + 1};
-        if (use_cuda_graph) {
+        // Working-set sessions remap the KV row: attention consumes row-local positions, so
+        // the eager envelope bound uses the per-row row-local frontiers (plan §2.2); rows
+        // without a session keep true positions (row_local is identity there).
+        std::uint32_t attention_max = 0;
+        for (std::size_t row = 0; row < lanes.size(); ++row) {
+            const SequenceState& sequence = active_sequence(lanes[row]);
+            const std::uint32_t frontier  = sequence.execution_frontier;
+            const std::uint32_t local     =
+                sequence.working_set ? sequence.working_set->row_local(frontier) : frontier;
+            attention_max = std::max(attention_max, local);
+        }
+        ops::CausalAttentionExecutionEnvelope envelope{attention_max + 1, attention_max + 1};
+        const bool use_graph = use_cuda_graph;
+        if (use_graph) {
             DecodeGraphProfile& profile =
                 select_graph_profile(ordinary_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "ordinary batch");
@@ -317,9 +329,11 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             SequenceState& sequence            = active_sequence(lanes[row]);
             const RequestControl& request      = requests[lanes[row]];
             const std::uint32_t frontier       = sequence.execution_frontier;
+            const std::uint32_t cache_position =
+                sequence.working_set ? sequence.working_set->row_local(frontier) : frontier;
             ordinary_host_ingress->tokens[row] = sequence.ledger.back();
             ordinary_host_ingress->cache_positions[row] =
-                checked_i32(frontier, "ordinary batch position");
+                checked_i32(cache_position, "ordinary batch position");
             ordinary_host_ingress->rope_positions[row] =
                 checked_i32(frontier, "ordinary batch RoPE position") + sequence.rope_delta;
             ordinary_host_ingress->text_kv_table_rows[row] =
@@ -363,6 +377,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             validate_licensed_tokens(std::span<const TokenId>(&token, 1));
             sequence.text_kv_valid = base_E + 1;
             commit_sequence_kv(sequence, sequence.text_kv_valid, 0);
+            maybe_apply_working_set(sequence);
             sequence.tail_hidden_valid = true;
             sequence.ledger.push_back(token);
             sequence.prefix_identity.append_generated(1, sequence.rope_delta);
@@ -637,7 +652,8 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         DecodeGraphExecutable* executable    = nullptr;
         execution::DFlashEnvelopes envelopes = dflash_envelopes(0, maximum_frontier, draft_window);
         ops::CausalAttentionExecutionEnvelope target_envelope{1, maximum_target_tokens};
-        if (use_cuda_graph) {
+        const bool use_graph = use_cuda_graph;
+        if (use_graph) {
             DecodeGraphProfile& profile =
                 select_graph_profile(dflash_graphs, static_cast<std::uint32_t>(lanes.size()),
                                      maximum_frontier, "DFlash batch");
@@ -662,6 +678,10 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
                 checked_i32(frontier, "DFlash batch frontier");
+            // Target verification reads the main KV row, which a working-set session remaps
+            // to row-local coordinates; the draft model keeps true positions above.
+            dflash_host_ingress->verify_base_positions[row] =
+                checked_i32(kv_row_coordinate(sequence, frontier), "DFlash verify base");
             dflash_host_ingress->context_frontiers[row] =
                 checked_i32(sequence.dflash_context_frontier, "DFlash context frontier");
             dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);

@@ -39,13 +39,19 @@ endif()
 # --- Windows / MSVC port settings (headpiece747 Windows build) ---------------
 if(MSVC)
   add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UTF8PROC_STATIC)
+  # /EHsc: full C++ exception handling. The MSVC default /EHs-c- miscompiles
+  # stack unwinding (a local unique_ptr destructor can be skipped when a
+  # constructor throws), which leaked Win32 file handles from artifact::Reader
+  # and blocked re-opening files for writing while a stale handle was alive.
   add_compile_options(
     $<$<COMPILE_LANGUAGE:C,CXX>:/Zc:preprocessor>
     $<$<COMPILE_LANGUAGE:C,CXX>:/FS>
     $<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/EHsc>
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/FS>
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/EHsc>
   )
 endif()
 

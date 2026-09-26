@@ -10,6 +10,8 @@
 #include "models/qwen3_5/frontend/prepared_prompt.h"
 
 #include "models/qwen3_5/program/planning/startup.h"
+#include "models/qwen3_5/program/planning/working_set.h"
+#include "ninfer/types.h"
 #include "models/qwen3_5/program/storage/draft_context.h"
 #include "models/qwen3_5/program/storage/host_kv_store.h"
 #include "models/qwen3_5/program/storage/kv_store.h"
@@ -21,6 +23,7 @@
 #include "models/qwen3_5/program/vision_prefill.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <array>
 #include <limits>
@@ -182,6 +185,8 @@ struct RequestBasePlanImpl {
     ops::SamplingConfig sampling;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
+    // Auto working set: this request's granted device budget (0 = use the global policy).
+    std::uint32_t working_set_budget = 0;
     std::shared_ptr<const qwen3_5::VisionControlPlan> vision_control_plan;
     std::optional<qwen3_5::RewriteCheckpointSpec> rewrite_checkpoint;
     std::vector<CaptureGroup> capture_groups;
@@ -246,6 +251,8 @@ struct AdmissionCandidateImpl : ResourceCandidateState {
     ops::SamplingConfig sampling;
     std::uint32_t text_kv_page_entitlement    = 0;
     std::uint32_t backend_kv_page_entitlement = 0;
+    // Auto working set: this request's granted device budget (0 = use the global policy).
+    std::uint32_t working_set_budget = 0;
     runtime::LaneId destination{};
     std::uint64_t destination_epoch = 0;
     runtime::PrefillWork root_rebuild_work;
@@ -360,6 +367,9 @@ struct SequenceState {
     std::uint32_t text_kv_valid           = 0;
     std::uint32_t mtp_kv_valid            = 0;
     std::uint32_t dflash_context_frontier = 0;
+    std::optional<WorkingSetSession> working_set;  // host-KV working-set remap state (true vs row-local)
+    // Auto working set: this sequence's granted device budget (0 = use the global policy).
+    std::uint32_t working_set_budget = 0;
     std::array<TokenId, qwen3_5::kMtpDecodeMaximumDrafts> mtp_drafts{};
     std::uint32_t mtp_draft_count = 0;
     bool tail_hidden_valid        = false;
@@ -553,6 +563,24 @@ public:
 
     [[nodiscard]] qwen3_5::PhysicalUsageSnapshot physical_usage() const noexcept;
 
+    [[nodiscard]] WorkingSetStats working_set_stats() const noexcept;
+    [[nodiscard]] WorkingSetConfig working_set_config() const noexcept;
+    // Effective working-set policy for one sequence: its auto-granted budget when set, else the
+    // global policy. Callers must ensure working_set_policy_ is engaged.
+    [[nodiscard]] WorkingSetPolicy working_set_policy_for(const SequenceState& sequence)
+        const noexcept;
+    // Sized-slots mode: this lane's fixed device-window ceiling, or nullopt when not in per-lane
+    // mode (or for an unconfigured lane). Applied at prefill to override the plan's grant budget.
+    [[nodiscard]] std::optional<std::uint32_t> working_set_lane_budget(std::uint32_t lane)
+        const noexcept {
+        if (!working_set_per_lane_ || lane >= lane_count_) { return std::nullopt; }
+        return lane_budgets_[lane];
+    }
+    // Recompute this request's auto working-set grant from the current device pool and refresh
+    // its per-session budget plus text KV entitlement. No-op unless the working set is auto-sized.
+    void update_working_set_entitlement(RequestBasePlanImpl& base,
+                                       std::uint32_t reserved_context_tokens);
+
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
 
     void reset_memory_peaks() noexcept;
@@ -589,6 +617,17 @@ public:
     std::unique_ptr<LogicalKVPageStore> backend_kv_pages;
     std::unique_ptr<KVAddressSpaceStore> backend_kv_addresses;
     std::unique_ptr<HostKVExtentStore> host_kv_extents;
+    std::optional<WorkingSetPolicy> working_set_policy_;  // host-KV working-set trigger (off = bit-identical)
+    bool working_set_auto_ = false;                        // budget derived from the device pool at admission
+    std::uint32_t working_set_grant_mode_ = 0;            // auto grant: 0 take-remaining | 1 fair-even | 2 elastic
+    // Sized-slots mode: each concurrency lane holds a fixed share of the device KV pool instead of
+    // one shared auto-granted budget. lane_budgets_[i] is lane i's resolved device-window ceiling;
+    // the global policy takes the largest lane as a conservative fit-check bound and the exact
+    // per-lane ceiling is applied at prefill via sequence.working_set_budget.
+    bool working_set_per_lane_ = false;
+    std::array<std::uint32_t, kMaximumConcurrency> lane_budgets_{};
+    std::uint32_t lane_count_ = 0;
+    WorkingSetStats working_set_stats_;                   // monotonic working-set activity counters
     std::size_t text_host_kv_page_stride    = 0;
     std::size_t backend_host_kv_page_stride = 0;
     std::unique_ptr<qwen3_5::StateImageDevicePool> state_images;
@@ -1180,6 +1219,11 @@ private:
     void release_sequence_kv(SequenceState& sequence) noexcept;
     void commit_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
                             std::uint32_t backend_tokens = 0);
+    void apply_sequence_working_set(SequenceState& sequence, const WorkingSetPolicy& policy);
+    void maybe_apply_working_set(SequenceState& sequence);
+    void record_working_set_selection(std::chrono::steady_clock::time_point started) noexcept;
+    [[nodiscard]] std::uint32_t kv_row_coordinate(const SequenceState& sequence,
+                                                  std::uint32_t true_tokens) const;
     [[nodiscard]] qwen3_5::PagedKVCache* backend_kv_cache() noexcept;
     [[nodiscard]] const qwen3_5::PagedKVCache* backend_kv_cache() const noexcept;
     [[nodiscard]] std::uint32_t backend_kv_valid(const SequenceState& sequence) const noexcept;

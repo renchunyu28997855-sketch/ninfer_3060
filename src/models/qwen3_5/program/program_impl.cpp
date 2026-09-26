@@ -18,6 +18,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace ninfer::models::qwen3_5::detail {
 
 static_assert(std::is_nothrow_move_assignable_v<SpeculativeStats>);
@@ -25,6 +29,18 @@ static_assert(std::is_nothrow_move_assignable_v<SpeculativeStats>);
 namespace {
 
 std::uint32_t normalized_private_capacity(const ContextCacheOptions& options);
+
+// Installed physical RAM in bytes; 0 when the platform cannot report it (no pre-check).
+[[nodiscard]] std::uint64_t physical_memory_bytes() {
+#ifdef _WIN32
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    return GlobalMemoryStatusEx(&status) ? status.ullTotalPhys : 0ULL;
+#else
+    return 0ULL;
+#endif
+}
+
 
 std::uint32_t normalized_private_capacity(const ContextCacheOptions& options) {
     if (!options.max_private_continuations || *options.max_private_continuations == 0) {
@@ -184,7 +200,24 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         pressure_backend_page_scratch_.resize(backend_kv_pages->capacity());
         pressure_backend_selected_pages_.reserve(backend_kv_pages->capacity());
     }
-    if (plan.context_cache.host_kv_capacity_bytes != 0) {
+    if (plan.context_cache.host_kv_capacity_bytes != 0 || plan.working_set.has_value()) {
+        std::size_t host_kv_capacity_bytes = plan.context_cache.host_kv_capacity_bytes;
+        if (host_kv_capacity_bytes == 0 && plan.working_set.has_value()) {
+            // No explicit host KV capacity: auto-size so every concurrent session can park its
+            // full true history on host (plan §4.4), failing loudly instead of pinning more
+            // than the machine can hold.
+            const std::uint64_t stride =
+                plan_host_kv_page_layout(decoder->text_kv.page_pool().geometry()).page_stride;
+            host_kv_capacity_bytes = working_set_auto_host_capacity(
+                plan.max_concurrency, plan.capacity, stride);
+            const std::uint64_t physical = physical_memory_bytes();
+            if (physical != 0 && host_kv_capacity_bytes * 4 > physical * 3) {
+                // Graceful degradation: cap the auto pool at three quarters of installed system
+                // memory instead of refusing to start. Sessions park what fits; the overflow
+                // stays device-resident under pressure eviction.
+                host_kv_capacity_bytes = physical * 3 / 4;
+            }
+        }
         std::vector<HostKVPageLayout> layouts;
         layouts.push_back(plan_host_kv_page_layout(decoder->text_kv.page_pool().geometry()));
         if (const qwen3_5::PagedKVCache* backend = backend_kv_cache()) {
@@ -194,19 +227,18 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         }
         StartupPhaseScope host_kv_phase(
             startup_observer, StartupPhase::HostKvPin, StartupProgressUnit::Bytes,
-            static_cast<std::uint64_t>(plan.context_cache.host_kv_capacity_bytes));
+            static_cast<std::uint64_t>(host_kv_capacity_bytes));
         host_kv_arena = std::make_unique<HostKVArena>(
-            plan.context_cache.host_kv_capacity_bytes,
+            host_kv_capacity_bytes,
             std::span<const HostKVPageLayout>(layouts.data(), layouts.size()));
         host_kv_phase.complete(
-            static_cast<std::uint64_t>(plan.context_cache.host_kv_capacity_bytes),
-            static_cast<std::uint64_t>(plan.context_cache.host_kv_capacity_bytes));
+            static_cast<std::uint64_t>(host_kv_capacity_bytes),
+            static_cast<std::uint64_t>(host_kv_capacity_bytes));
         std::size_t minimum_stride = layouts.front().page_stride;
         for (const HostKVPageLayout& layout : layouts) {
             minimum_stride = std::min(minimum_stride, layout.page_stride);
         }
-        const std::size_t extent_capacity =
-            plan.context_cache.host_kv_capacity_bytes / minimum_stride;
+        const std::size_t extent_capacity = host_kv_capacity_bytes / minimum_stride;
         if (extent_capacity > std::numeric_limits<std::uint32_t>::max()) {
             throw std::overflow_error("Qwen3.5 Host KV extent capacity exceeds uint32");
         }
@@ -214,6 +246,86 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             host_kv_extents = std::make_unique<HostKVExtentStore>(
                 *host_kv_arena, static_cast<std::uint32_t>(extent_capacity));
         }
+    }
+    if (plan.working_set.has_value()) {
+        if (!host_kv_extents) {
+            throw std::logic_error("working-set plan requires host KV extents");
+        }
+        WorkingSetPolicy policy = *plan.working_set;
+        if (plan.working_set_slot_percentages.empty()) {
+            if (plan.working_set_auto) {
+                // Resolve the ceiling from the device KV pool: one session never needs more than
+                // the whole pool, and the pool may be smaller than the full context. Block-align
+                // down, then re-derive the sink from the actual ceiling unless one was given.
+                std::uint32_t ceiling =
+                    kv_capacity < policy.budget_tokens ? kv_capacity : policy.budget_tokens;
+                ceiling &= ~static_cast<std::uint32_t>(kWorkingSetBlockTokens - 1);
+                const std::uint32_t sink = plan.working_set_sink_explicit
+                                              ? policy.sink_tokens
+                                              : working_set_derive_sink(ceiling);
+                if (sink > ceiling || ceiling < sink + prefill_chunk) {
+                    throw std::invalid_argument(
+                        "device KV pool is too small for an auto working set: it must hold at least "
+                        "the sink plus one prefill chunk");
+                }
+                policy = WorkingSetPolicy{ceiling, sink};
+            }
+        } else {
+            // Sized slots: resolve each lane's fixed device-window ceiling from the device KV
+            // pool and derive a shared sink that stays valid for every lane. The global policy
+            // takes the largest lane as a conservative fit-check upper bound; the exact per-lane
+            // ceiling is applied at prefill via sequence.working_set_budget (prefill.cpp).
+            const auto& shares = plan.working_set_slot_percentages;
+            if (shares.size() != static_cast<std::size_t>(max_concurrency)) {
+                throw std::invalid_argument(
+                    "working-set slot percentages must number exactly one per concurrency lane");
+            }
+            double total_share = 0.0;
+            for (const double share : shares) {
+                if (!(share > 0.0) || !(share <= 100.0)) {
+                    throw std::invalid_argument("working-set slot percentages must be in (0,100]");
+                }
+                total_share += share;
+            }
+            if (total_share > 100.0 + 1e-6) {
+                throw std::invalid_argument("working-set slot percentages must sum to at most 100");
+            }
+            std::uint32_t max_lane  = 0;
+            std::uint32_t min_lane  = kv_capacity;
+            std::uint64_t sum_lanes = 0;
+            for (std::size_t i = 0; i < shares.size(); ++i) {
+                const std::uint64_t raw =
+                    (static_cast<std::uint64_t>(kv_capacity) *
+                     static_cast<std::uint64_t>(shares[i])) / 100ULL;
+                std::uint32_t lane = static_cast<std::uint32_t>(raw);
+                lane &= ~static_cast<std::uint32_t>(kWorkingSetBlockTokens - 1);
+                if (lane == 0) {
+                    throw std::invalid_argument(
+                        "device KV pool is too small for a per-lane working set: every lane needs "
+                        "at least one block");
+                }
+                lane_budgets_[i] = lane;
+                sum_lanes        += lane;
+                if (lane > max_lane) { max_lane = lane; }
+                if (lane < min_lane) { min_lane = lane; }
+            }
+            if (sum_lanes > static_cast<std::uint64_t>(kv_capacity)) {
+                throw std::invalid_argument(
+                    "device KV pool is too small for the requested per-lane working sets: the lane "
+                    "windows must fit within the pool");
+            }
+            std::uint32_t sink = plan.working_set_sink_explicit ? policy.sink_tokens
+                                                                : working_set_derive_sink(min_lane);
+            if (sink > min_lane) {
+                sink = min_lane & ~static_cast<std::uint32_t>(kWorkingSetBlockTokens - 1);
+            }
+            working_set_per_lane_ = true;
+            lane_count_           = static_cast<std::uint32_t>(shares.size());
+            policy                = WorkingSetPolicy{max_lane, sink};
+        }
+        working_set_policy_     = std::move(policy);
+        working_set_auto_       = plan.working_set_auto;
+        working_set_grant_mode_ = plan.working_set_grant_mode;
     }
 
     io = qwen3_5::RoundState(backing, plan.persistent.round);
@@ -421,7 +533,8 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
                 state_slot,
                 state_slot,
                 0,
-                nullptr};
+                nullptr,
+                cursor};
             mark_workspace_usage(workspace_plan.text_prefill);
             const execution::PrefillChunkResult result = execution::prefill_text_chunk(
                 schedule_state, std::span<const TokenId>(prompt.token_ids), nominal, std::nullopt,

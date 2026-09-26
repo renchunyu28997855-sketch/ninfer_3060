@@ -10,11 +10,13 @@
 #include "models/qwen3_5/program/round_buffers.h"
 #include "models/qwen3_5/state/state_image.h"
 #include "models/load_options.h"
+#include "models/qwen3_5/program/planning/working_set.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::detail {
 
@@ -83,6 +85,16 @@ struct SequencePlanningInputs {
     bool causal_scoring = false;
     int device          = 0;
     ContextCacheOptions context_cache;
+    // Host KV working-set policy (off = nullopt); the arena auto-sizes from it when no
+    // explicit host KV capacity is configured. working_set_auto marks a budget that the
+    // Program resolves from the device KV pool rather than a fixed operator value.
+    std::optional<WorkingSetPolicy> working_set;
+    bool working_set_auto = false;
+    bool working_set_sink_explicit = false;
+    // Sized-slots mode: per-lane device-window percentages of the device KV pool (empty = off).
+    std::vector<double> working_set_slot_percentages;
+    // Auto admission grant policy: 0 take-remaining | 1 fair even split | 2 elastic.
+    std::uint32_t working_set_grant_mode = 0;
 };
 
 } // namespace ninfer::models::qwen3_5::detail
@@ -105,6 +117,11 @@ struct SequencePlanImpl {
     bool causal_scoring = false;
     int device          = 0;
     ContextCacheOptions context_cache;
+    std::optional<WorkingSetPolicy> working_set;
+    bool working_set_auto = false;
+    bool working_set_sink_explicit = false;
+    std::vector<double> working_set_slot_percentages;
+    std::uint32_t working_set_grant_mode = 0;
     PersistentLayout persistent;
     WorkspacePlan workspace;
     std::size_t graph_allowance_bytes    = 0;

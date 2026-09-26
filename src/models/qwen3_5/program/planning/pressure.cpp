@@ -2644,5 +2644,106 @@ qwen3_5::PhysicalUsageSnapshot ProgramImpl::physical_usage() const noexcept {
     };
 }
 
+WorkingSetStats ProgramImpl::working_set_stats() const noexcept { return working_set_stats_; }
+
+WorkingSetConfig ProgramImpl::working_set_config() const noexcept {
+    WorkingSetConfig config;
+    if (working_set_policy_.has_value()) {
+        config.enabled       = true;
+        config.auto_sized    = working_set_auto_;
+        config.per_lane      = working_set_per_lane_;
+        config.grant_mode    = working_set_grant_mode_;
+        config.budget_tokens = working_set_policy_->budget_tokens;
+        config.sink_tokens   = working_set_policy_->sink_tokens;
+        if (working_set_per_lane_) {
+            config.lane_budget_tokens.assign(lane_budgets_.begin(),
+                                             lane_budgets_.begin() + lane_count_);
+        }
+    }
+    return config;
+}
+
+WorkingSetPolicy ProgramImpl::working_set_policy_for(const SequenceState& sequence)
+    const noexcept {
+    WorkingSetPolicy policy = *working_set_policy_;
+    if (sequence.working_set_budget != 0) {
+        policy.budget_tokens = sequence.working_set_budget;
+    }
+    return policy;
+}
+
+void ProgramImpl::update_working_set_entitlement(RequestBasePlanImpl& base,
+                                                std::uint32_t reserved_context_tokens) {
+    if (!working_set_policy_) { return; }
+    std::uint32_t effective_budget = working_set_policy_->budget_tokens;
+    if (working_set_auto_) {
+        const std::uint32_t ceiling    = working_set_policy_->budget_tokens;
+        const std::uint32_t sink       = working_set_policy_->sink_tokens;
+        const std::uint32_t align_mask = ~static_cast<std::uint32_t>(kWorkingSetBlockTokens - 1U);
+        std::uint32_t granted = 0;
+        if (working_set_grant_mode_ == 1) {
+            // Fair even split: every session targets pool / max_concurrency, deterministic and
+            // never over-subscribed (all max_concurrency shares sum to the pool). Capped at the
+            // ceiling; 0 (queues via FIFO) if the pool cannot hold even one sink.
+            const std::uint32_t pool_tokens =
+                static_cast<std::uint32_t>(text_kv_pages->capacity()) * kPagedKVPageSize;
+            granted = (pool_tokens / max_concurrency) & align_mask;
+            if (granted > ceiling) { granted = ceiling & align_mask; }
+            if (granted < sink) { granted = 0; }
+        } else if (working_set_grant_mode_ == 2) {
+            // Elastic: a guaranteed even floor plus a share of the currently-free pool, so light
+            // load uses more VRAM while a full cohort settles at the even floor. Incumbents keep
+            // their windows; the surplus top-up only draws from genuinely free pages, so it
+            // never over-subscribes the physical pool.
+            std::uint32_t holders = 0;
+            for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
+                if (requests[lane].lifecycle == Lifecycle::Prefilling ||
+                    requests[lane].lifecycle == Lifecycle::Active) { ++holders; }
+            }
+            const std::uint32_t concurrent  = holders + 1; // include the request being admitted
+            const std::uint32_t pool_tokens =
+                static_cast<std::uint32_t>(text_kv_pages->capacity()) * kPagedKVPageSize;
+            const std::uint32_t floor_even = (pool_tokens / max_concurrency) & align_mask;
+            const std::uint32_t free_pages =
+                text_kv_pages->capacity() > text_kv_pages->occupied()
+                    ? text_kv_pages->capacity() - text_kv_pages->occupied()
+                    : 0U;
+            const std::uint32_t bonus = static_cast<std::uint32_t>(
+                (static_cast<std::uint64_t>(free_pages) * kPagedKVPageSize) / concurrent);
+            granted = (floor_even + bonus) & align_mask;
+            if (granted > ceiling) { granted = ceiling & align_mask; }
+            if (granted < sink) { granted = 0; }
+        } else {
+            // Default (mode 0): take the remaining device pool for this session, recomputed from
+            // the live pool on every admission retry so a queued request picks up freed pages
+            // instead of starving behind a stale full-window demand.
+            const std::uint32_t free_pages =
+                text_kv_pages->capacity() > text_kv_pages->occupied()
+                    ? text_kv_pages->capacity() - text_kv_pages->occupied()
+                    : 0U;
+            granted = working_set_grant_budget(ceiling, free_pages * kPagedKVPageSize, sink,
+                                               prefill_chunk);
+        }
+        // A fixed even/elastic floor smaller than one sink would leave every session queued;
+        // in that degenerate pool fall back to the take-remaining grant so sessions still make
+        // progress (fairness yields to liveness).
+        if ((working_set_grant_mode_ == 1 || working_set_grant_mode_ == 2) && granted == 0) {
+            const std::uint32_t free_pages =
+                text_kv_pages->capacity() > text_kv_pages->occupied()
+                    ? text_kv_pages->capacity() - text_kv_pages->occupied()
+                    : 0U;
+            granted = working_set_grant_budget(ceiling, free_pages * kPagedKVPageSize, sink,
+                                               prefill_chunk);
+        }
+        base.working_set_budget = granted;
+        if (granted != 0) { effective_budget = granted; }
+    } else {
+        base.working_set_budget = 0;
+    }
+    const WorkingSetPolicy effective{effective_budget, working_set_policy_->sink_tokens};
+    base.text_kv_page_entitlement = working_set_pages_for_tokens(
+        working_set_device_window(effective, reserved_context_tokens, prefill_chunk));
+}
+
 
 } // namespace ninfer::models::qwen3_5::detail

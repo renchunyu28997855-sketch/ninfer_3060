@@ -472,6 +472,20 @@ runtime::ProgramResourceRevision Program::resource_revision() const noexcept {
 
 PhysicalUsageSnapshot Program::physical_usage() const noexcept { return impl_->physical_usage(); }
 
+WorkingSetStats Program::working_set_stats() const noexcept { return impl_->working_set_stats(); }
+
+WorkingSetConfig Program::working_set_config() const noexcept { return impl_->working_set_config(); }
+
+void Program::refresh_working_set_grant(RequestBasePlan& base) const noexcept
+{
+    const std::uint32_t reserved =
+        base.impl_->summary.prompt_tokens +
+        (base.impl_->summary.effective_output_tokens == 0
+             ? 0U
+             : base.impl_->summary.effective_output_tokens - 1U);
+    impl_->update_working_set_entitlement(*base.impl_, reserved);
+}
+
 MemorySummary Program::memory_summary() const noexcept { return impl_->memory_summary(); }
 
 void Program::reset_memory_peaks() noexcept { impl_->reset_memory_peaks(); }

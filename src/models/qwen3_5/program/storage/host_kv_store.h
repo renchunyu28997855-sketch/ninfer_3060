@@ -4,10 +4,13 @@
 #include "models/qwen3_5/program/storage/kv_store.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -101,6 +104,74 @@ public:
         std::optional<HostKVAllocation> allocation =
             arena_->allocate(layout, static_cast<std::uint32_t>(membership.size()));
         if (!allocation) { return std::nullopt; }
+
+        const std::uint32_t descriptor = free_[--free_count_];
+        Extent& extent                 = extents_[descriptor];
+        if (extent.state != ExtentState::Free) { std::terminate(); }
+        extent.state      = ExtentState::Reserved;
+        extent.page_store = &pages;
+        extent.allocation = std::move(allocation);
+        for (const LogicalKVPageHandle page : membership) {
+            const std::uint32_t node = take_membership();
+            if (node == kInvalidIndex) { std::terminate(); }
+            Membership& entry = memberships_[node];
+            entry.page        = page;
+            entry.epoch       = pages.content_epoch(page);
+            entry.coverage    = pages.committed_columns(page);
+            entry.extent      = descriptor;
+            entry.offset      = extent.page_count;
+            entry.next        = kInvalidIndex;
+            if (extent.tail == kInvalidIndex) {
+                extent.head = node;
+            } else {
+                memberships_[extent.tail].next = node;
+            }
+            extent.tail = node;
+            ++extent.page_count;
+        }
+        for (const LogicalKVPageHandle page : membership) { pages.pin_source(page); }
+
+        HostKVExtentReservation reservation;
+        reservation.owner_      = this;
+        reservation.descriptor_ = descriptor;
+        reservation.generation_ = extent.generation;
+        reservation.page_store_ = &pages;
+        return reservation;
+    }
+
+    // Swap-out source preparation for the host working-set demotion path (M2). Every member is
+    // the unique active owner of its row (writer==1, refs==1), so the pin guard is
+    // can_pin_active_source rather than the can_pin_source used by prepare() for fork-shared
+    // read-only sources. Data is copied out and the device replica freed afterwards; the logical
+    // descriptor survives via the attached Host replica.
+    [[nodiscard]] std::optional<HostKVExtentReservation>
+    prepare_active_owner(LogicalKVPageStore& pages,
+                         std::span<const LogicalKVPageHandle> membership) {
+        if (membership.empty()) {
+            return std::nullopt;
+        }
+        if (free_count_ == 0) {
+            return std::nullopt;
+        }
+        if (membership.size() > free_membership_count_) {
+            return std::nullopt;
+        }
+        for (std::size_t i = 0; i < membership.size(); ++i) {
+            const LogicalKVPageHandle page = membership[i];
+            if (!pages.can_pin_active_source(page)) {
+                return std::nullopt;
+            }
+            if (pages.host_resident(page)) {
+                return std::nullopt;
+            }
+        }
+
+        const HostKVPageLayout& layout = page_layout(pages);
+        std::optional<HostKVAllocation> allocation =
+            arena_->allocate(layout, static_cast<std::uint32_t>(membership.size()));
+        if (!allocation) {
+            return std::nullopt;
+        }
 
         const std::uint32_t descriptor = free_[--free_count_];
         Extent& extent                 = extents_[descriptor];
@@ -706,6 +777,192 @@ private:
 
 inline HostKVExtentReservation::~HostKVExtentReservation() {
     if (owner_ != nullptr) { owner_->abort(*this); }
+}
+
+// Out-of-class definition: the body needs the complete HostKVExtentStore type, which this header
+// provides after kv_store.h's declaration.
+//
+// Two-directional working-set remap: pages that leave the row are demoted to the Host tier
+// (D2H batch, Host replica attached, device reference released), and Host-resident pages that
+// enter the row are promoted (fresh device page materialized, H2D refill, published, old
+// Host-only descriptor plus its arena storage reclaimed). All validation happens up front so
+// the mutation phase only fails on allocation capacity (std::bad_alloc -> admission rejects
+// the turn).
+inline WorkingSetSwapSummary KVAddressSpaceStore::swap_remap_working_set(
+    KVAddressSpaceHandle handle,
+    std::span<const LogicalKVPageHandle> new_row,
+    std::uint32_t resident_tokens,
+    HostKVExtentStore& host_extents,
+    cudaStream_t stream) {
+    const std::size_t page_stride = host_extents.page_layout(*pages_).page_stride;
+    Address& address = require_active(handle);
+    const std::uint32_t count = static_cast<std::uint32_t>(new_row.size());
+    if (count == 0) {
+        throw std::logic_error("working-set remap requires a non-empty row");
+    }
+    // Every entrant is either device-resident (kept or re-entered as-is) or waits Host-only in
+    // the working-set tier. Host-only pages carry zero references between demotion and
+    // promotion, so the "unreferenced" rejection below applies to device pages only; their
+    // replicas are pre-validated here so the promotion phase cannot fail mid-mutation.
+    std::uint32_t promote_count = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const LogicalKVPageHandle page = new_row[i];
+        if (!page.valid()) {
+            throw std::logic_error("working-set remap lists an invalid page");
+        }
+        const bool promote = pages_->host_resident(page) && !pages_->device_resident(page);
+        if (!promote && !pages_->device_resident(page)) {
+            throw std::logic_error(
+                "working-set remap lists a page without a device or Host replica");
+        }
+        if (promote && !host_extents.can_release_page_replica(*pages_, page)) {
+            throw std::logic_error(
+                "working-set remap lists a Host page whose replica cannot be reclaimed");
+        }
+        for (std::uint32_t j = 0; j < i; ++j) {
+            if (new_row[j] == page) {
+                throw std::logic_error("working-set remap lists a page twice");
+            }
+        }
+        if (!promote && pages_->active_address_references(page) == 0 &&
+            pages_->address_references(page) == 0) {
+            throw std::logic_error("working-set remap lists an unreferenced page");
+        }
+        if (promote) { ++promote_count; }
+    }
+    if (pages_for_tokens(resident_tokens) > count) {
+        throw std::logic_error("working-set remap resident tokens exceed the new row");
+    }
+    if (address.checkpoint_frontier > resident_tokens) {
+        throw std::logic_error("working-set remap would drop protected checkpoint coverage");
+    }
+    // The re-based row claims each slot's token range is valid, so every listed page must
+    // already carry that much committed coverage (coverage is a content property and never
+    // grows during a remap).
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t begin  = i * static_cast<std::uint32_t>(kPagedKVPageSize);
+        const std::uint32_t needed = std::min(static_cast<std::uint32_t>(kPagedKVPageSize),
+                                              resident_tokens - begin);
+        if (pages_->committed_columns(new_row[i]) < needed) {
+            throw std::logic_error(
+                "working-set remap lists a page with insufficient committed coverage");
+        }
+    }
+    if (pages_->occupied() + promote_count > pages_->capacity()) {
+        throw std::bad_alloc();
+    }
+
+    // Promote Host-only entrants before any mutation: each becomes a fresh device page
+    // refilled from its Host replica and published as the unique writer of its content. A
+    // device-resident page always takes the fast path even when it also carries a (possibly
+    // stale) Host replica, so the replica is never a content source for a live device page.
+    std::vector<LogicalKVPageHandle> effective(count);
+    std::vector<LogicalKVPageHandle> reclaimed;
+    double promoted_seconds = 0.0;
+    double demoted_seconds  = 0.0;
+    if (promote_count != 0) {
+        std::optional<DeviceKVPageReservation> in_reservation =
+            pages_->physical_pool().reserve(promote_count);
+        if (!in_reservation) { throw std::bad_alloc(); }
+        const auto promote_started = std::chrono::steady_clock::now();
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const LogicalKVPageHandle page = new_row[i];
+            if (!pages_->host_resident(page) || pages_->device_resident(page)) {
+                effective[i] = page;
+                continue;
+            }
+            const HostKVPageReplica replica = pages_->host_replica(page);
+            const LogicalKVPageHandle fresh =
+                pages_->materialize_transfer_destination(*in_reservation,
+                                                         pages_->committed_columns(page));
+            reclaimed.push_back(page);
+            const auto source =
+                host_extents.view(replica.extent).subview(replica.page_offset, 1);
+            const std::array<DeviceKVPageHandle, 1> destination{pages_->physical(fresh)};
+            pages_->physical_pool().copy_from_host(source, destination, stream);
+            pages_->publish_transfer_destination(fresh, /*writer=*/true);
+            effective[i] = fresh;
+        }
+        promoted_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - promote_started)
+                .count();
+    } else {
+        for (std::uint32_t i = 0; i < count; ++i) { effective[i] = new_row[i]; }
+    }
+    for (const LogicalKVPageHandle page : effective) {
+        if (pages_->active_address_references(page) == 0) {
+            pages_->retain_active_reference(page);
+        }
+    }
+    const std::uint32_t previous = address.page_count;
+    std::vector<LogicalKVPageHandle> old_members(previous);
+    for (std::uint32_t i = 0; i < previous; ++i) { old_members[i] = membership(address, i); }
+
+    // Demote pages that leave the row to the Host working-set tier before releasing their
+    // device reference, so the data survives in Host rather than being discarded. Pages that
+    // are still referenced by another address (shared prefix reuse) or already parked in
+    // Host are not re-copied here: their data survives through the other live reference or
+    // the existing replica, and this address simply drops its share below.
+    std::vector<LogicalKVPageHandle> leaving;
+    std::vector<LogicalKVPageHandle> to_demote;
+    for (const LogicalKVPageHandle member : old_members) {
+        bool kept = false;
+        for (const LogicalKVPageHandle page : effective) {
+            if (page == member) { kept = true; break; }
+        }
+        if (kept) { continue; }
+        leaving.push_back(member);
+        if (!pages_->host_resident(member) && pages_->can_pin_active_source(member)) {
+            to_demote.push_back(member);
+        }
+    }
+    if (!to_demote.empty()) {
+        std::optional<HostKVExtentReservation> reserved =
+            host_extents.prepare_active_owner(*pages_, to_demote);
+        if (!reserved) { throw std::bad_alloc(); }
+        const std::vector<DeviceKVPageHandle> sources = host_extents.device_sources(*reserved);
+        const auto demote_started = std::chrono::steady_clock::now();
+        pages_->physical_pool().copy_to_host(sources, host_extents.writable_view(*reserved),
+                                             stream);
+        demoted_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - demote_started)
+                .count();
+        // The per-page Host replicas already carry the extent capability; the returned
+        // capability is redundant here.
+        (void)host_extents.publish(std::move(*reserved));
+    }
+
+    publish_scratch_.clear();
+    for (const LogicalKVPageHandle page : effective) {
+        publish_scratch_.push_back(pages_->physical(page));
+    }
+    tables_->publish(address.row->handle(), 0, publish_scratch_, stream);
+    for (std::uint32_t i = 0; i < count; ++i) { membership(address, i) = effective[i]; }
+    address.page_count         = count;
+    address.committed_frontier = resident_tokens;
+    for (const LogicalKVPageHandle member : leaving) {
+        pages_->release_active_reference(member);
+        if (!pages_->release_reference(member, /*writer=*/true)) { std::terminate(); }
+    }
+    for (std::uint32_t i = count; i < previous; ++i) { membership(address, i) = {}; }
+    // Retire the superseded Host-only pages: their content now lives in the fresh device
+    // pages, so the replicas (and the arena storage behind them) are reclaimable. Zero
+    // references plus no device replica means the logical descriptors are reclaimed too.
+    if (!reclaimed.empty()) {
+        const std::span<const LogicalKVPageHandle> reclaimed_span(reclaimed.data(),
+                                                                 reclaimed.size());
+        if (!host_extents.release_page_replicas(*pages_, reclaimed_span)) {
+            std::terminate();
+        }
+    }
+    return WorkingSetSwapSummary{
+        .demoted_pages  = static_cast<std::uint32_t>(leaving.size()),
+        .promoted_pages = promote_count,
+        .demoted_bytes  = page_stride * static_cast<std::size_t>(to_demote.size()),
+        .promoted_bytes = page_stride * static_cast<std::size_t>(promote_count),
+        .demoted_seconds = demoted_seconds,
+        .promoted_seconds = promoted_seconds,
+    };
 }
 
 } // namespace ninfer::models::qwen3_5::detail

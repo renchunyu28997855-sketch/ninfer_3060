@@ -238,6 +238,27 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.use_cuda_graph           = options_.use_cuda_graph;
     engine_options.wddm_evictable_budget    = options_.wddm_evictable_budget;
     engine_options.speculative              = options_.speculative;
+    const bool per_lane_slots   = !options_.kv_slot_percentages.empty();
+    const bool ws_enabled       = per_lane_slots || options_.kv_working_set != 0 ||
+                                  options_.kv_working_set_auto;
+    engine_options.working_set.enabled = ws_enabled;
+    if (per_lane_slots) {
+        // Sized-slots mode: each concurrency lane gets a fixed share of the device KV pool; the
+        // engine resolves the per-lane ceilings (and derives each lane's sink) at startup.
+        engine_options.working_set.slot_percentages = options_.kv_slot_percentages;
+    } else if (ws_enabled) {
+        if (options_.kv_working_set_auto) {
+            // The budget is resolved from the device KV pool at startup; only an explicitly
+            // given sink is forwarded, otherwise the engine derives it from the budget.
+            engine_options.working_set.grant_mode = options_.kv_ws_grant_mode;
+            if (options_.kv_sink_explicit) {
+                engine_options.working_set.sink_tokens = options_.kv_sink;
+            }
+        } else {
+            engine_options.working_set.budget_tokens = options_.kv_working_set;
+            engine_options.working_set.sink_tokens   = options_.kv_sink;
+        }
+    }
     engine_options.context_cache            = options_.context_cache;
     engine_options.context_cost.preset_path = options_.context_cost_presets;
     engine_options.media_cache_bytes        = options_.media_cache_bytes;

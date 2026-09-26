@@ -87,6 +87,12 @@ bool report_has_activity(const ThroughputReport& report) {
            report.current.backend_kv_d2h_pages != report.previous.backend_kv_d2h_pages ||
            report.current.backend_kv_h2d_pages != report.previous.backend_kv_h2d_pages ||
            report.current.backend_kv_d2d_pages != report.previous.backend_kv_d2d_pages ||
+           report.current.working_set_selections != report.previous.working_set_selections ||
+           report.current.working_set_swaps != report.previous.working_set_swaps ||
+           report.current.working_set_demoted_pages !=
+               report.previous.working_set_demoted_pages ||
+           report.current.working_set_promoted_pages !=
+               report.previous.working_set_promoted_pages ||
            report.current.pressure_spill_pages != report.previous.pressure_spill_pages ||
            report.current.partial_tail_cow_pages != report.previous.partial_tail_cow_pages ||
            report.current.pressure_private_owners_degraded !=

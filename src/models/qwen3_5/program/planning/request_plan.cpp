@@ -259,7 +259,15 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
         base->summary.prompt_tokens + (base->summary.effective_output_tokens == 0
                                            ? 0U
                                            : base->summary.effective_output_tokens - 1U);
-    base->text_kv_page_entitlement = pages_for_tokens(reserved_context_tokens);
+    // Under a working-set policy the device row is bounded by the resident window plus one
+    // inter-trigger headroom chunk; admission sees that peak instead of the full context. An
+    // auto-sized working set grants each new session the remaining device pool, and the grant is
+    // refreshed on every admission retry (Program::refresh_working_set_grant).
+    if (working_set_policy_) {
+        update_working_set_entitlement(*base, reserved_context_tokens);
+    } else {
+        base->text_kv_page_entitlement = pages_for_tokens(reserved_context_tokens);
+    }
     if (speculative_backend == SpeculativeBackend::Mtp) {
         const std::uint32_t mtp_tokens    = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             capacity, static_cast<std::uint64_t>(reserved_context_tokens) + draft_window - 1ULL));
@@ -454,6 +462,7 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     plan->sampling                    = base.sampling;
     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
+    plan->working_set_budget          = base.working_set_budget;
     plan->root_rebuild_work           = base.root_rebuild_work;
     plan->root_rebuild_tail_begin     = base.root_rebuild_tail_begin;
 

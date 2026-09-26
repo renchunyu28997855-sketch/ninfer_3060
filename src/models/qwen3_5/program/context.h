@@ -54,6 +54,9 @@ struct PrefillContext {
     std::int32_t state_destination_slot                     = 0;
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_5::DFlashDecodeIngress* dflash_host_ingress = nullptr;
+    // True-space RoPE base for the cache base above; equals text_kv_base unless a working-set
+    // session remapped the row (plan §2.2: RoPE keeps using true positions).
+    std::uint32_t text_rope_base = 0;
 };
 
 struct OrdinaryBatchContext {

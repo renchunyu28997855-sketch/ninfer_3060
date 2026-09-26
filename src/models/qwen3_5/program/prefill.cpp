@@ -68,6 +68,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
                                     .state_destination_slot = state.state_destination_slot,
                                     .mtp_proposal_extent = state.mtp_proposal_extent});
     configure_text_card(card, state.execution);
+    card.set_text_rope_base(state.text_rope_base);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
@@ -486,6 +487,13 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         if (request_plan.reuse == ReusePath::Root) {
             sequence.rewrite_checkpoint = {};
             ordered_reset(sequence);
+            // A fresh staging replaces this lane's KV bundle: a working-set session left
+            // behind by a previous request references the old row layout and would poison
+            // every kv_row_coordinate translation of the new row (row_local below frontier).
+            sequence.working_set.reset();
+            // A fresh session takes its auto working-set grant from the admitted plan; reuse
+            // and fork branches keep the budget their lineage already holds.
+            sequence.working_set_budget = request_plan.working_set_budget;
             sequence.ledger.clear();
             sequence.prefix_digests.clear();
             sequence.text_kv_valid = 0;
@@ -639,7 +647,21 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                            prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
-        ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
+        // Sized slots: this lane's fixed device-window ceiling overrides any plan grant for
+        // every request on the lane (fresh, reuse, and fork alike); it drives the resident
+        // window below and the subsequent per-chunk compaction.
+        if (const auto lane_ceiling = working_set_lane_budget(sequence.lane)) {
+            sequence.working_set_budget = *lane_ceiling;
+        }
+        const std::uint32_t upfront_text_tokens =
+            working_set_policy_
+                ? working_set_device_window(working_set_policy_for(sequence), prompt_tokens,
+                                            prefill_chunk)
+                : prompt_tokens;
+        ensure_sequence_kv_mapped(sequence, upfront_text_tokens, backend_materialized);
+        // A reused prefix longer than the window arrives fully mapped; compact it down to
+        // the resident row before the first chunk runs so the row stays bounded throughout.
+        maybe_apply_working_set(sequence);
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
@@ -937,6 +959,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
 
             commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
             trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
+            maybe_apply_working_set(sequence);
             if (terminal[row]) {
                 request.lifecycle = Lifecycle::Finishable;
             } else {
@@ -1050,7 +1073,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             std::uint32_t final_chunk_tokens = 0;
             bool finalized                   = false;
             while (remaining != 0) {
-                schedule_state.text_kv_base           = staged.cursor;
+                const std::uint32_t nominal_chunk = remaining;
+                // Extend device coverage to this chunk's end. Under a working-set policy the
+                // up-front mapping stops at the resident window, so chunks beyond it map
+                // their tail here (row-local once a session remaps the row) before the
+                // attention kernels write into it.
+                ensure_sequence_kv_mapped(sequence, staged.cursor + nominal_chunk,
+                                          backend_kv_cache() ? staged.cursor + nominal_chunk
+                                                             : 0U);
+                schedule_state.text_kv_base           = kv_row_coordinate(sequence, staged.cursor);
+                schedule_state.text_rope_base         = staged.cursor;
                 selectors                             = state_selectors(sequence);
                 schedule_state.state_source_slot      = selectors.source;
                 schedule_state.state_destination_slot = selectors.destination;
@@ -1062,7 +1094,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     schedule_state.rewrite_checkpoint_hidden = nullptr;
                 }
 
-                const bool final_candidate = staged.cursor + remaining == staged.prompt_tokens;
+                const bool is_final_chunk = staged.cursor + remaining == staged.prompt_tokens;
                 const std::optional<std::uint32_t> capture_frontier =
                     staged.next_capture < staged.capture_groups.size()
                         ? std::optional<std::uint32_t>(
@@ -1085,11 +1117,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     mark_workspace_usage(workspace_plan.vision->capacity_bytes);
                     result = execution::prefill_multimodal_chunk(schedule_state, staged.prompt,
                                                                  *staged.vision, remaining,
-                                                                 split_frontier, final_candidate);
+                                                                 split_frontier, is_final_chunk);
                 } else {
                     result = execution::prefill_text_chunk(
                         schedule_state, std::span<const TokenId>(staged.prompt.token_ids),
-                        remaining, split_frontier, final_candidate);
+                        remaining, split_frontier, is_final_chunk);
                 }
                 timing.include(result.timing);
                 timing.resume_post();
@@ -1107,6 +1139,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     sequence.dflash_context_frontier = staged.cursor;
                 }
                 commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
+                // Long-prompt streaming demotion: after each committed chunk the row is still
+                // active, so the working-set trigger can slide the resident window and demote
+                // fallen-out blocks to Host before the next chunk maps new pages.
+                maybe_apply_working_set(sequence);
 
                 // Prompt transitions are canonical immediately. If this was the first write after
                 // an immutable source, close the Fork before potentially freezing a new rewrite.

@@ -239,7 +239,8 @@ TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weight
                          const qwen3_5::PagedKVCache* batch_mtp_kv, TextCallConfig call)
     : ctx_(ctx), parameters_(weights), config_(weights.model.config().text), work_(work), kv_(kv),
       mtp_kv_(mtp_kv), state_(state), io_(io), prefill_hidden_(prefill_hidden),
-      prefill_chunk_(prefill_chunk), text_kv_base_(text_kv_base), batch_text_kv_(batch_text_kv),
+      prefill_chunk_(prefill_chunk), text_kv_base_(text_kv_base), text_rope_base_(text_kv_base),
+      batch_text_kv_(batch_text_kv),
       batch_mtp_kv_(batch_mtp_kv) {
     if (prefill_chunk_ == 0 ||
         prefill_chunk_ > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
@@ -1165,6 +1166,10 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
         throw std::overflow_error("TextContext::prefill absolute position exceeds int32");
     }
     const int base_i = static_cast<int>(base);
+    // Working-set sessions remap the cache base to row-local positions; RoPE keeps the true
+    // base (plan §2.2). Dense mode: text_rope_base_ == base, no divergence.
+    const bool rope_diverges = text_rope_base_ != base;
+    const int rope_base_i     = rope_diverges ? static_cast<int>(text_rope_base_) : base_i;
 
     const std::int64_t base64    = static_cast<std::int64_t>(base);
     const std::int64_t split_abs = prefill_split_frontier_;
@@ -1212,7 +1217,8 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 }
             }
 
-            const std::int32_t rope_axes = multimodal != nullptr ? 3 : (rope_delta_ != 0 ? 1 : 0);
+            const std::int32_t rope_axes =
+                multimodal != nullptr ? 3 : (rope_diverges || rope_delta_ != 0 ? 1 : 0);
             const auto roots             = workspace::text_prefill_roots(
                 work_, config_, len, rope_axes,
                 static_cast<std::int32_t>(local_scatter_indices.size()));
@@ -1224,7 +1230,13 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
 
             Tensor rope_positions = positions;
             std::vector<std::int32_t> rope_positions_host;
-            if (multimodal != nullptr) {
+            if (rope_diverges) {
+                rope_positions = roots.rope_positions;
+                ops::fill_i32_positions(rope_positions, rope_base_i + t0, s);
+                if (rope_delta_ != 0) {
+                    ops::offset_i32_positions(rope_positions, io_.rope_delta, rope_positions, s);
+                }
+            } else if (multimodal != nullptr) {
                 rope_positions = roots.rope_positions;
                 rope_positions_host.resize(static_cast<std::size_t>(3) * len);
                 const std::size_t prompt_tokens = multimodal->token_ids.size();

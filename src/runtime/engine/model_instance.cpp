@@ -5,6 +5,7 @@
 #include "core/startup.h"
 #include "models/qwen3_5/load.h"
 #include "models/qwen3_5/measurement.h"
+#include "models/qwen3_5/program/planning/startup.h"
 
 #include <algorithm>
 #include <chrono>
@@ -57,6 +58,12 @@ void validate_options(const EngineOptions& options) {
     }
     if (options.media_preprocess_threads > 64) {
         throw std::invalid_argument("Engine media_preprocess_threads must be in [0,64]");
+    }
+    if (options.working_set.enabled &&
+        options.speculative.backend == SpeculativeBackend::Mtp) {
+        throw std::invalid_argument(
+            "Engine working set is mutually exclusive with MTP speculative decoding; "
+            "dflash/dflash2 are supported");
     }
 }
 
@@ -114,6 +121,7 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         options.speculative          = {};
         options.enable_vision        = false;
         options.use_cuda_graph       = false;
+        options.working_set          = {};
         options.context_cache        = ContextCacheOptions{.enabled = false};
         break;
     default:
@@ -135,7 +143,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
         }
         cache.device_state_slots                = 0;
         cache.host_state_slots                  = 0;
-        cache.host_kv_capacity_bytes            = 0;
+        // A working-set session parks evicted blocks on the host KV pool even though cross-request
+        // context caching is disabled; only zero the capacity when nothing will use it.
+        if (!options.working_set.enabled) { cache.host_kv_capacity_bytes = 0; }
         cache.max_private_continuations         = concurrency;
         cache.max_shared_prefixes               = 0;
         cache.max_long_anchors_per_continuation = 0;
@@ -256,6 +266,14 @@ ConstructedModel construct_model(const EngineOptions& options, DeviceContext& de
     summary.device_object_count  = stats.device_object_count;
     summary.host_object_count    = stats.host_object_count;
     summary.context_cost         = std::move(context_cost.summary);
+    const WorkingSetConfig working_set = instance->program->working_set_config();
+    summary.working_set_enabled       = working_set.enabled;
+    summary.working_set_auto          = working_set.auto_sized;
+    summary.working_set_per_lane      = working_set.per_lane;
+    summary.working_set_grant_mode    = working_set.grant_mode;
+    summary.working_set_budget_tokens = working_set.budget_tokens;
+    summary.working_set_sink_tokens   = working_set.sink_tokens;
+    summary.working_set_lane_budget_tokens = working_set.lane_budget_tokens;
     return {std::move(instance), std::move(summary), std::move(context_cost.model)};
 }
 

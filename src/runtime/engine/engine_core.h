@@ -1417,6 +1417,11 @@ private:
         if (!request->base_plan) {
             request->base_plan.emplace(
                 instance_.program->plan_request(request->prompt, request->options.execution));
+        } else {
+            // Refresh the auto working-set grant against the live device pool so a queued
+            // request picks up pages freed since its first planning attempt instead of
+            // starving behind a stale full-window demand.
+            instance_.program->refresh_working_set_grant(*request->base_plan);
         }
         const RequestPlanSummary& summary = request->base_plan->summary();
         if (summary.service_work_quanta == 0) {

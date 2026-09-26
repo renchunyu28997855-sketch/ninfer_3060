@@ -86,6 +86,7 @@ std::string usage_text(const char* argv0) {
            "       [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens "
            "N]\n"
+           "       [--kv-working-set N] [--kv-sink N] [--kv-host-capacity BYTES]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -105,6 +106,13 @@ std::string usage_text(const char* argv0) {
            "--kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom.\n"
+           "Long-context working set: --kv-working-set keeps selected recent/similar blocks of a "
+           "long history resident in the device KV row and parks the rest on pinned host memory; "
+           "0 disables it. It requires block-aligned (128-token) values with --kv-sink <= "
+           "--kv-working-set, --kv-capacity at least --kv-working-set + --prefill-chunk, and is "
+           "mutually exclusive with --spec mtp (dflash/dflash2 are supported).\n"
+           "--kv-host-capacity BYTES sizes the host pool explicitly; 0 auto-sizes it from max "
+           "context and concurrency.\n"
            "Sampling defaults come from the loaded model and thinking mode; flags override "
            "individual fields.\n";
 }
@@ -141,6 +149,12 @@ Options parse_options(int argc, char** argv) {
             kv_capacity_explicit = true;
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
+        } else if (arg == "--kv-working-set") {
+            options.kv_working_set = parse_u32(value(arg), "kv-working-set", true);
+        } else if (arg == "--kv-sink") {
+            options.kv_sink = parse_u32(value(arg), "kv-sink", true);
+        } else if (arg == "--kv-host-capacity") {
+            options.kv_host_capacity = parse_u64(value(arg), "kv-host-capacity");
         } else if (arg == "--device") {
             options.device = parse_device(value(arg));
         } else if (arg == "--kv-dtype") {
@@ -219,9 +233,35 @@ Options parse_options(int argc, char** argv) {
     if (options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a multiple of 128");
     }
+    if (options.kv_sink % 128 != 0) {
+        throw std::invalid_argument("--kv-sink must be a multiple of 128");
+    }
+    if (options.kv_working_set != 0) {
+        if (options.kv_working_set % 128 != 0) {
+            throw std::invalid_argument("--kv-working-set must be a multiple of 128");
+        }
+        if (options.kv_sink > options.kv_working_set) {
+            throw std::invalid_argument("--kv-sink must not exceed --kv-working-set");
+        }
+        if (options.speculative.backend == SpeculativeBackend::Mtp) {
+            throw std::invalid_argument(
+                "--kv-working-set is mutually exclusive with MTP speculative decoding (--spec mtp); "
+                "dflash/dflash2 are supported");
+        }
+    }
+    if (options.kv_host_capacity != 0 && options.kv_working_set == 0) {
+        throw std::invalid_argument("--kv-host-capacity requires --kv-working-set");
+    }
+    const std::uint64_t minimum_kv_capacity =
+        options.kv_working_set != 0
+            ? static_cast<std::uint64_t>(options.kv_working_set) + options.prefill_chunk
+            : options.max_context;
     if (options.kv_capacity.mode == KvCapacityMode::Explicit &&
-        options.kv_capacity.explicit_tokens < options.max_context) {
-        throw std::invalid_argument("--kv-capacity must be at least --max-context");
+        options.kv_capacity.explicit_tokens < minimum_kv_capacity) {
+        throw std::invalid_argument(options.kv_working_set != 0
+                                        ? "--kv-capacity must be at least --kv-working-set + "
+                                          "--prefill-chunk"
+                                        : "--kv-capacity must be at least --max-context");
     }
     product::validate_speculative_cli_options(options.speculative);
     if (options.enable_thinking == false && options.reasoning_effort &&

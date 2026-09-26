@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,17 @@ class KVAddressSpaceStore;
 class HostKVExtentStore;
 class KVPrefixForkReservation;
 class KVActiveSnapshotReservation;
+
+// Outcome of a working-set remap: how many pages moved between tiers and what the async
+// copies transferred (page stride times page count; seconds cover copy submission).
+struct WorkingSetSwapSummary {
+    std::uint32_t demoted_pages  = 0; // device -> Host
+    std::uint32_t promoted_pages = 0; // Host -> device
+    std::uint64_t demoted_bytes  = 0;
+    std::uint64_t promoted_bytes = 0;
+    double demoted_seconds       = 0.0;
+    double promoted_seconds      = 0.0;
+};
 
 class HostKVExtentCapability {
 public:
@@ -1496,6 +1508,127 @@ public:
         address.committed_frontier = frontier;
     }
 
+    // Working-set row remap (host-KV M2). Rebuilds the execution row from an explicit
+    // logical-page list ordered by true position and rebases the address to the new resident
+    // token count. A listed page either belongs to the current row (survives) or was freshly
+    // materialized for this address (enters); entering pages carry no active reference yet
+    // and receive one here. Pages that leave the row are released when no other address
+    // references them.
+    void remap_working_set(KVAddressSpaceHandle handle,
+                          std::span<const LogicalKVPageHandle> new_row,
+                          std::uint32_t resident_tokens, cudaStream_t stream = nullptr) {
+        Address& address = require_active(handle);
+        const std::uint32_t count = static_cast<std::uint32_t>(new_row.size());
+        if (count == 0) {
+            throw std::logic_error("working-set remap requires a non-empty row");
+        }
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const LogicalKVPageHandle page = new_row[i];
+            if (!page.valid() || !pages_->device_resident(page)) {
+                throw std::logic_error("working-set remap lists a page without a device replica");
+            }
+            for (std::uint32_t j = 0; j < i; ++j) {
+                if (new_row[j] == page) {
+                    throw std::logic_error("working-set remap lists a page twice");
+                }
+            }
+            if (pages_->active_address_references(page) == 0 && pages_->address_references(page) == 0) {
+                throw std::logic_error("working-set remap lists an unreferenced page");
+            }
+        }
+        if (pages_for_tokens(resident_tokens) > count) {
+            throw std::logic_error("working-set remap resident tokens exceed the new row");
+        }
+        if (address.checkpoint_frontier > resident_tokens) {
+            throw std::logic_error("working-set remap would drop protected checkpoint coverage");
+        }
+        // The re-based row claims each slot's token range is valid, so every listed page must
+        // already carry that much committed coverage (coverage is a content property and never
+        // grows during a remap).
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::uint32_t begin  = i * static_cast<std::uint32_t>(kPagedKVPageSize);
+            const std::uint32_t needed = std::min(static_cast<std::uint32_t>(kPagedKVPageSize),
+                                                  resident_tokens - begin);
+            if (pages_->committed_columns(new_row[i]) < needed) {
+                throw std::logic_error(
+                    "working-set remap lists a page with insufficient committed coverage");
+            }
+        }
+        for (const LogicalKVPageHandle page : new_row) {
+            if (pages_->active_address_references(page) == 0) {
+                pages_->retain_active_reference(page);
+            }
+        }
+        const std::uint32_t previous = address.page_count;
+        std::vector<LogicalKVPageHandle> old_members(previous);
+        for (std::uint32_t i = 0; i < previous; ++i) { old_members[i] = membership(address, i); }
+        publish_scratch_.clear();
+        for (const LogicalKVPageHandle page : new_row) {
+            publish_scratch_.push_back(pages_->physical(page));
+        }
+        tables_->publish(address.row->handle(), 0, publish_scratch_, stream);
+        for (std::uint32_t i = 0; i < count; ++i) { membership(address, i) = new_row[i]; }
+        address.page_count         = count;
+        address.committed_frontier = resident_tokens;
+        for (std::uint32_t i = 0; i < previous; ++i) {
+            const LogicalKVPageHandle member = old_members[i];
+            bool kept = false;
+            for (const LogicalKVPageHandle page : new_row) {
+                if (page == member) { kept = true; break; }
+            }
+            if (kept) { continue; }
+            pages_->release_active_reference(member);
+            if (pages_->can_dematerialize(member)) {
+                pages_->dematerialize(member, address.reservation);
+            }
+        }
+        for (std::uint32_t i = count; i < previous; ++i) { membership(address, i) = {}; }
+    }
+
+    // Working-set row remap with Host demotion/promotion (host-KV M2). Rebuilds the execution
+    // row from new_row (ordered by true position) and re-bases the address to resident_tokens
+    // exactly as remap_working_set. Unlike remap_working_set, pages that leave the row are not
+    // discarded: they are demoted to the Host working-set tier in one batch (D2H into a single
+    // extent, Host replica attached, device reference released so the device replica is
+    // reclaimed while the logical descriptor survives via the Host replica). Conversely,
+    // Host-resident pages that enter the row are promoted: each becomes a fresh device page
+    // refilled from its Host replica and published as the unique writer of its content, after
+    // which the superseded descriptor and arena storage are reclaimed. Every leaving page must
+    // be a unique active owner (writer==1, refs==1) and not already Host-resident; every
+    // promoted page's replica must be releasable. A failed Host or device allocation throws
+    // std::bad_alloc (admission rejects the turn).
+    // Defined in host_kv_store.h, where HostKVExtentStore is complete.
+    WorkingSetSwapSummary swap_remap_working_set(KVAddressSpaceHandle handle,
+                                                 std::span<const LogicalKVPageHandle> new_row,
+                                                 std::uint32_t resident_tokens,
+                                                 HostKVExtentStore& host_extents,
+                                                 cudaStream_t stream = nullptr);
+
+    // Working-set row compaction (host-KV M1 scaffold): a remap whose new row is a strictly
+    // ascending subset of the current row. Pages that leave the row are released when no
+    // other address references them: M1 has no host replica, so eviction discards device
+    // storage; M2 replaces this with host demotion before release.
+    void compact_working_set(KVAddressSpaceHandle handle,
+                             std::span<const std::uint32_t> resident_logical_pages,
+                             std::uint32_t resident_tokens, cudaStream_t stream = nullptr) {
+        Address& address = require_active(handle);
+        const std::uint32_t count = static_cast<std::uint32_t>(resident_logical_pages.size());
+        if (count == 0 || count > address.page_count) {
+            throw std::logic_error("working-set compaction requires a non-empty resident subset");
+        }
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::uint32_t page = resident_logical_pages[i];
+            if (page >= address.page_count || (i != 0 && resident_logical_pages[i - 1] >= page)) {
+                throw std::logic_error("working-set compaction pages must be strictly ascending");
+            }
+        }
+        std::vector<LogicalKVPageHandle> row(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            row[i] = membership(address, resident_logical_pages[i]);
+        }
+        remap_working_set(handle, row, resident_tokens, stream);
+    }
+
     void destructive_truncate(KVAddressSpaceHandle handle, std::uint32_t frontier) {
         Address& address = require_active(handle);
         if (frontier > address.committed_frontier) {
@@ -1733,6 +1866,14 @@ public:
         free_[free_count_++]           = index;
         rebuild_checkpoint_protection();
         return true;
+    }
+
+    // Logical pages currently mapped into the active row, in row order.
+    [[nodiscard]] std::span<const LogicalKVPageHandle>
+    active_membership(KVAddressSpaceHandle handle) const {
+        const Address& address = require(handle);
+        const std::size_t index = static_cast<std::size_t>(&address - addresses_.data());
+        return {memberships_.data() + index * page_capacity_, address.page_count};
     }
 
 private:

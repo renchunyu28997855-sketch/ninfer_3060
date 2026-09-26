@@ -331,6 +331,8 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
     anchors = ingress_tensor(offsetof(DFlashDecodeIngress, anchors), DType::I32, {batch});
     execution_frontiers =
         ingress_tensor(offsetof(DFlashDecodeIngress, execution_frontiers), DType::I32, {batch});
+    verify_base_positions =
+        ingress_tensor(offsetof(DFlashDecodeIngress, verify_base_positions), DType::I32, {batch});
     context_frontiers =
         ingress_tensor(offsetof(DFlashDecodeIngress, context_frontiers), DType::I32, {batch});
     proposal_extents =

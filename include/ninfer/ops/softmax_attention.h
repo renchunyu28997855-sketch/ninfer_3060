@@ -115,13 +115,15 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
  * the host. B=1 accepts every positive W in the current prompt/decode domain; B=2..8 accepts
  * W=1..16.
  *
- * Let Vb be W for dense input or valid_columns[b] otherwise. For live column j<Vb with absolute
- * position p=positions[j,b], query head h attends cache rows [0,p] through table row
- * kv_table_rows[b]. The current k/v row is appended before it is observed, so the formula is the
- * shared oracle above over J=[0,p]. Each masked row has a live prefix [0,Vb); its live positions
- * are sequential and address populated histories. A nonempty row repeats its last live position
- * through the inert tail; an empty row uses zero positions. Other tail values are safe dummies.
- * Tail columns do not mutate cache and produce exact BF16 zero.
+ * Let Vb be W for dense input or valid_columns[b] otherwise. positions[j,b] is the row-local
+ * logical index of the token in table row kv_table_rows[b] (it equals the true sequence position
+ * exactly when the row is a dense prefix from zero). For live column j<Vb with row-local position
+ * p=positions[j,b], query head h attends cache rows [0,p] through table row kv_table_rows[b]. The
+ * current k/v row is appended before it is observed, so the formula is the shared oracle above
+ * over J=[0,p]. Each masked row has a live prefix [0,Vb); its live positions are sequential and
+ * address populated histories. A nonempty row repeats its last live position through the inert
+ * tail; an empty row uses zero positions. Other tail values are safe dummies. Tail columns do not
+ * mutate cache and produce exact BF16 zero.
  *
  * The registered prompt route consumes the paged cache directly and requires zero transient
  * workspace. Small-T routes may use the split state returned by the capacity query below.

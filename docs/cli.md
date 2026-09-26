@@ -209,6 +209,9 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--max-context N` | per-sequence logical context ceiling | `2048` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `2048` |
 | `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
+| `--kv-working-set N` | long-context working-set budget in tokens: keeps selected history resident on Device KV and parks the rest in Host KV; multiple of 128, `0` disables | `0` |
+| `--kv-sink N` | always-resident working-set prefix, in tokens; multiple of 128, at most `--kv-working-set` | `2048` |
+| `--kv-host-capacity BYTES` | explicit pinned Host KV pool size for the working set; `0` auto-sizes it from max context and concurrency | `0` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
@@ -266,6 +269,15 @@ and CUDA Graph allowance, while leaving the default 1 GiB automatic headroom
 unallocated. It does not probe allocations or resize the pool at request time. The single-request
 CLI normally leaves the option omitted so it follows
 `--max-context`; the distinction matters primarily to a concurrent Engine or server.
+
+`--kv-working-set N` lets one conversation's committed history exceed the resident Device KV
+pool. While enabled, NInfer keeps a selected working set of up to `N/128` 128-token blocks
+resident: the `--kv-sink` prefix plus the newest blocks. Every other committed
+block is parked in the pinned Host KV pool and copied back on demand when it re-enters the
+working set. Requirements: block-aligned values, `--kv-sink` ≤ `--kv-working-set`,
+`--kv-capacity` at least `--kv-working-set` + `--prefill-chunk`, and no MTP speculative
+backend (`--spec mtp`); `--spec dflash`/`--spec dflash2` are supported. With `--kv-host-capacity 0` the Host pool auto-sizes from max context and
+concurrency; an explicit byte value overrides it.
 
 At Engine startup NInfer reserves model weights, persistent sequence state, one phase-reused
 Program workspace, and a separate CUDA Graph driver allowance. With Vision enabled, that one

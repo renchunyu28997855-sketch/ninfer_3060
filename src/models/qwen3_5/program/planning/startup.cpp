@@ -823,6 +823,11 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->causal_scoring      = inputs.causal_scoring;
     impl->device              = inputs.device;
     impl->context_cache       = inputs.context_cache;
+    impl->working_set         = inputs.working_set;
+    impl->working_set_auto    = inputs.working_set_auto;
+    impl->working_set_sink_explicit = inputs.working_set_sink_explicit;
+    impl->working_set_slot_percentages = inputs.working_set_slot_percentages;
+    impl->working_set_grant_mode   = inputs.working_set_grant_mode;
     impl->kv_storage          = inputs.kv_storage;
     impl->persistent          = persistent_layout(*impl);
     impl->workspace           = build_workspace_plan(*impl);
@@ -880,6 +885,61 @@ std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,
                            const EngineOptions& options) {
     validate_target_options(parameters, device, options);
+    std::optional<WorkingSetPolicy> working_set_policy;
+    const bool working_set_per_lane =
+        options.working_set.slot_percentages.has_value() &&
+        !options.working_set.slot_percentages->empty();
+    if (options.working_set.enabled) {
+        if (options.speculative.backend == SpeculativeBackend::Mtp) {
+            throw std::invalid_argument(
+                "working-set mode is incompatible with MTP speculative decoding; "
+                "dflash/dflash2 are supported");
+        }
+        if (working_set_per_lane) {
+            // Sized slots: one fixed device-window share per concurrency lane. Plan against the
+            // full-context ceiling so the host arena is sized for full-history parking; the
+            // Program resolves each lane's ceiling (and derives each lane's sink) from the
+            // device KV pool once its capacity is known.
+            const auto& shares = options.working_set.slot_percentages.value();
+            if (shares.size() != static_cast<std::size_t>(options.max_concurrency)) {
+                throw std::invalid_argument(
+                    "working-set slot percentages must number exactly one per concurrency lane");
+            }
+            double total_share = 0.0;
+            for (const double share : shares) {
+                if (!(share > 0.0) || !(share <= 100.0)) {
+                    throw std::invalid_argument(
+                        "working-set slot percentages must be in (0,100]");
+                }
+                total_share += share;
+            }
+            if (total_share > 100.0 + 1e-6) {
+                throw std::invalid_argument(
+                    "working-set slot percentages must sum to at most 100");
+            }
+            const auto sink = options.working_set.sink_tokens.value_or(
+                working_set_derive_sink(options.max_context));
+            working_set_policy = WorkingSetPolicy{options.max_context, sink};
+        } else if (options.working_set.budget_tokens.has_value()) {
+            const auto budget = options.working_set.budget_tokens.value();
+            const auto sink   =
+                options.working_set.sink_tokens.value_or(kDefaultWorkingSetSinkTokens);
+            if (budget == 0 || budget % kWorkingSetBlockTokens != 0 || sink > budget ||
+                sink % kWorkingSetBlockTokens != 0) {
+                throw std::invalid_argument(
+                    "working-set policy must use positive block-aligned budgets with sink <= budget");
+            }
+            working_set_policy = WorkingSetPolicy{budget, sink};
+        } else {
+            // Auto sizing: the budget is resolved from the device KV pool once the Program
+            // knows its capacity. Plan against the ceiling cap (full context) so the host
+            // arena is sized for full-history parking; the Program refines the budget and,
+            // when no sink was given, derives one at construction.
+            const auto sink = options.working_set.sink_tokens.value_or(
+                working_set_derive_sink(options.max_context));
+            working_set_policy = WorkingSetPolicy{options.max_context, sink};
+        }
+    }
     SequencePlanningInputs inputs{
         .parameters          = &parameters,
         .capacity            = options.max_context,
@@ -894,6 +954,12 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
         .device              = options.device,
         .context_cache       = options.context_cache,
+        .working_set         = working_set_policy,
+        .working_set_auto    = options.working_set.enabled && !working_set_per_lane &&
+                               !options.working_set.budget_tokens.has_value(),
+        .working_set_sink_explicit = options.working_set.sink_tokens.has_value(),
+        .working_set_slot_percentages = options.working_set.slot_percentages.value_or({}),
+        .working_set_grant_mode   = options.working_set.grant_mode,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);
     const std::uint32_t minimum_pages = std::max(logical_pages, inputs.max_concurrency);

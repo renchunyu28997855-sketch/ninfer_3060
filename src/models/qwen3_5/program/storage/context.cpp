@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <span>
@@ -1412,6 +1414,7 @@ void ProgramImpl::bind_sequence_kv(SequenceState& sequence) {
         }
         throw;
     }
+    maybe_apply_working_set(sequence);
 }
 
 void ProgramImpl::unbind_sequence_kv(SequenceState& sequence) noexcept {
@@ -1436,11 +1439,113 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
     if (backend_tokens != 0 && !sequence.kv->backend) {
         throw std::logic_error("backend KV materialization requested without an allocation");
     }
-    text_kv_addresses->ensure_mapped_to_tokens(sequence.kv->text, main_tokens, device.stream);
+    text_kv_addresses->ensure_mapped_to_tokens(sequence.kv->text,
+                                               kv_row_coordinate(sequence, main_tokens),
+                                               device.stream);
     if (backend_tokens != 0) {
         backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, backend_tokens,
                                                       device.stream);
     }
+}
+
+std::uint32_t ProgramImpl::kv_row_coordinate(const SequenceState& sequence,
+                                             std::uint32_t true_tokens) const {
+    // The KV store works in row-local coordinates once a working-set session has compacted the
+    // row; the model layer keeps true positions everywhere else.
+    const auto& working_set = sequence.working_set;
+    return working_set ? working_set->row_local(true_tokens) : true_tokens;
+}
+
+void ProgramImpl::apply_sequence_working_set(SequenceState& sequence,
+                                             const WorkingSetPolicy& policy) {
+    if (!sequence.kv || !text_kv_addresses->active(sequence.kv->text)) {
+        throw std::logic_error("working-set remap requires an active KV bundle");
+    }
+    const std::uint32_t history = sequence.text_kv_valid;
+    if (history == 0) {
+        throw std::logic_error("working-set remap requires committed history");
+    }
+    const auto selection_started = std::chrono::steady_clock::now();
+    // Cheap identity probe first: below the budget the row stays a dense prefix and no
+    // session can exist (history only grows), so the common no-compaction path returns
+    // before any table work.
+    const auto blocks = select_working_set_blocks(policy, history);
+    const std::uint32_t resident = working_set_resident_tokens(blocks, history);
+    if (resident == history) {
+        // The budget covers the whole history: the row stays a dense prefix, true positions
+        // equal row positions, and no session is needed (none can exist here either —
+        // history only grows, so a session implies history > budget).
+        if (sequence.working_set.has_value()) {
+            throw std::logic_error("working-set session outlived its budget");
+        }
+        record_working_set_selection(selection_started);
+        return;
+    }
+    const auto members = text_kv_addresses->active_membership(sequence.kv->text);
+    std::vector<WorkingSetPage> table;
+    if (sequence.working_set.has_value()) {
+        const WorkingSetSession& previous = sequence.working_set.value();
+        if (previous.compaction_true_frontier == history) {
+            // Already compacted for this history (re-binding within one turn): the row
+            // matches the selection, and any appended pages are uncommitted staging data
+            // that must not be demoted.
+            record_working_set_selection(selection_started);
+            return;
+        }
+        table = working_set_build_table(previous.pages, previous.compaction_true_frontier,
+                                        previous.resident_tokens, members, history);
+    } else {
+        table = working_set_build_table({}, 0, 0, members, history);
+    }
+    const auto new_row = working_set_pages(table, blocks);
+    if (sequence.working_set.has_value() && new_row.size() == members.size() &&
+        std::equal(new_row.begin(), new_row.end(), members.begin())) {
+        // The window grew but the resident page set did not: record the extended table and
+        // skip the republish.
+        sequence.working_set = WorkingSetSession{resident, history, std::move(table)};
+        record_working_set_selection(selection_started);
+        return;
+    }
+    const WorkingSetSwapSummary swap =
+        text_kv_addresses->swap_remap_working_set(
+            sequence.kv->text, new_row, resident, *host_kv_extents, device.stream);
+    working_set_stats_.swaps += 1;
+    working_set_stats_.demoted_pages += swap.demoted_pages;
+    working_set_stats_.promoted_pages += swap.promoted_pages;
+    working_set_stats_.d2h_bytes      += swap.demoted_bytes;
+    working_set_stats_.h2d_bytes      += swap.promoted_bytes;
+    working_set_stats_.d2h_seconds   += swap.demoted_seconds;
+    working_set_stats_.h2d_seconds   += swap.promoted_seconds;
+    // Promoted entrants land on fresh logical pages: refresh the resident table entries from
+    // the republished row (row order == selection order) so the table never names a
+    // superseded handle. Host-only entries keep their handles until they are re-promoted.
+    const auto row_members = text_kv_addresses->active_membership(sequence.kv->text);
+    const auto slots       = working_set_table_slots(table, blocks);
+    for (std::size_t i = 0; i < slots.size(); ++i) { table[slots[i]].page = row_members[i]; }
+    // The republished row holds only the resident pages; compaction must not leave the
+    // address entitled to less than the window ceiling, or the row can never regrow through
+    // budget + one chunk between compactions.
+    const std::uint32_t window_pages =
+        working_set_pages_for_tokens(policy.budget_tokens + prefill_chunk);
+    if (text_kv_addresses->entitlement(sequence.kv->text) < window_pages) {
+        text_kv_addresses->resize_entitlement(sequence.kv->text, window_pages);
+    }
+    sequence.working_set = WorkingSetSession{resident, history, std::move(table)};
+    record_working_set_selection(selection_started);
+}
+
+void ProgramImpl::record_working_set_selection(
+    std::chrono::steady_clock::time_point started) noexcept {
+    working_set_stats_.selections += 1;
+    working_set_stats_.selection_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+}
+
+void ProgramImpl::maybe_apply_working_set(SequenceState& sequence) {
+    if (!working_set_policy_ || !sequence.kv || sequence.text_kv_valid == 0) { return; }
+    // Compact against this session's own budget (its auto grant, or the global policy when no
+    // per-session grant was recorded).
+    apply_sequence_working_set(sequence, working_set_policy_for(sequence));
 }
 
 void ProgramImpl::commit_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
@@ -1449,7 +1554,7 @@ void ProgramImpl::commit_sequence_kv(SequenceState& sequence, std::uint32_t main
         (backend_tokens != 0 && !sequence.kv->backend)) {
         throw std::logic_error("KV commit request is outside the sequence bundle");
     }
-    text_kv_addresses->commit_frontier(sequence.kv->text, main_tokens);
+    text_kv_addresses->commit_frontier(sequence.kv->text, kv_row_coordinate(sequence, main_tokens));
     if (sequence.kv->backend) {
         backend_kv_addresses->commit_frontier(*sequence.kv->backend, backend_tokens);
     }
@@ -1463,7 +1568,7 @@ void ProgramImpl::trim_sequence_kv(SequenceState& sequence, std::uint32_t main_t
     if (backend_tokens != 0 && !sequence.kv->backend) {
         throw std::logic_error("backend KV trim requested without an allocation");
     }
-    text_kv_addresses->destructive_truncate(sequence.kv->text, main_tokens);
+    text_kv_addresses->destructive_truncate(sequence.kv->text, kv_row_coordinate(sequence, main_tokens));
     if (sequence.kv->backend) {
         backend_kv_addresses->destructive_truncate(*sequence.kv->backend, backend_tokens);
     }

@@ -74,6 +74,10 @@ struct MtpDecodeEgress {
 struct DFlashDecodeIngress {
     std::array<TokenId, kMaximumConcurrency> anchors{};
     std::array<std::int32_t, kMaximumConcurrency> execution_frontiers{};
+    // Base positions for the TARGET verify attention only: row-local under a working-set
+    // session (the main KV row is remapped), identical to execution_frontiers otherwise.
+    // The draft model keeps true positions through execution_frontiers.
+    std::array<std::int32_t, kMaximumConcurrency> verify_base_positions{};
     std::array<std::int32_t, kMaximumConcurrency> context_frontiers{};
     std::array<std::int32_t, kMaximumConcurrency> proposal_extents{};
     std::array<std::int32_t, kMaximumConcurrency> target_valid_columns{};
@@ -259,6 +263,7 @@ struct DFlashDecodeState {
     DeviceSpan egress;
     Tensor anchors;
     Tensor execution_frontiers;
+    Tensor verify_base_positions;
     Tensor context_frontiers;
     Tensor proposal_extents;
     Tensor target_valid_columns;

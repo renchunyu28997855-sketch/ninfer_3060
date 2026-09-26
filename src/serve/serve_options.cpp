@@ -1,6 +1,7 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
 
+#include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
@@ -45,6 +46,36 @@ std::uint64_t parse_u64(const char* text, const char* label) {
     return static_cast<std::uint64_t>(value);
 }
 
+std::vector<double> parse_slot_percentages(const char* text) {
+    std::vector<double> out;
+    std::string_view field(text);
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t comma = field.find(',', start);
+        const std::string_view raw =
+            (comma == std::string_view::npos) ? field.substr(start)
+                                              : field.substr(start, comma - start);
+        std::size_t b = 0, e = raw.size();
+        while (b < e && std::isspace(static_cast<unsigned char>(raw[b]))) { ++b; }
+        while (e > b && std::isspace(static_cast<unsigned char>(raw[e - 1]))) { --e; }
+        const std::string_view token = raw.substr(b, e - b);
+        if (token.empty()) {
+            throw std::invalid_argument("--kv-slot-percentages has an empty entry");
+        }
+        const std::string token_str(token);
+        char* end = nullptr;
+        const double value = std::strtod(token_str.c_str(), &end);
+        if (end == token_str.c_str() || *end != '\0') {
+            throw std::invalid_argument(
+                "invalid --kv-slot-percentages entry: " + token_str);
+        }
+        out.push_back(value);
+        if (comma == std::string_view::npos) { break; }
+        start = comma + 1;
+    }
+    return out;
+}
+
 KvCacheStorage parse_kv_dtype(const char* text) {
     const std::string value(text);
     if (value == "bf16") { return KvCacheStorage::BFloat16; }
@@ -79,6 +110,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--kv-working-set N|auto|auto-fair|auto-elastic] [--kv-sink N] [--kv-slot-percentages P0,P1,...] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
@@ -108,6 +140,22 @@ std::string serve_usage_text(const char* argv0) {
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
            "--host-kv-mib uses MiB\n"
+           "       --kv-working-set keeps selected long-history blocks on device and parks the "
+           "rest on pinned host memory; 0 disables it. 'auto' sizes each session's budget from "
+           "the device KV pool (ceiling = min(max context, pool), taking the remaining free pool "
+           "at admission) with a derived sink. 'auto-fair' gives every session an even "
+           "pool/max_concurrency share (deterministic, never over-subscribes); 'auto-elastic' "
+           "grants pool/current-active so light load uses more VRAM; both auto-size host/sink. "
+           "An explicit value requires block-aligned (128-token) "
+           "values, --kv-sink <= --kv-working-set, --kv-capacity at least --kv-working-set + "
+           "--prefill-chunk, and is mutually exclusive with --spec mtp (dflash/dflash2 are "
+           "supported). The host pool is sized by "
+           "--host-kv-mib or auto-sized from max context and concurrency when it is 0\n"
+           "       --kv-slot-percentages pins each concurrency lane to a fixed share of the "
+           "device KV pool (one percentage in (0,100] per --max-concurrency lane, summing to at "
+           "most 100); this is sized-slots mode. It may combine with --kv-working-set auto "
+           "(auto host/sink sizing) but is mutually exclusive with an explicit --kv-working-set "
+           "value and with --spec mtp. The launcher can also emit even splits.\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
            "control tokens count toward the request output limit\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
@@ -175,6 +223,28 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--prefill-chunk"), "prefill-chunk"));
+        } else if (arg == "--kv-working-set") {
+            const char* value      = require_value("--kv-working-set");
+            const std::string_view v{value};
+            if (v == "auto") {
+                options.kv_working_set_auto = true; // grant mode 0: take-remaining
+            } else if (v == "auto-fair") {
+                options.kv_working_set_auto = true;
+                options.kv_ws_grant_mode    = 1; // fair even split
+            } else if (v == "auto-elastic") {
+                options.kv_working_set_auto = true;
+                options.kv_ws_grant_mode    = 2; // elastic fair-by-active
+            } else {
+                options.kv_working_set =
+                    static_cast<std::uint32_t>(parse_nonnegative_int(value, "kv-working-set"));
+            }
+        } else if (arg == "--kv-sink") {
+            options.kv_sink          = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--kv-sink"), "kv-sink"));
+            options.kv_sink_explicit = true;
+        } else if (arg == "--kv-slot-percentages") {
+            options.kv_slot_percentages =
+                parse_slot_percentages(require_value("--kv-slot-percentages"));
         } else if (arg == "--context-cost-presets") {
             options.context_cost_presets = require_value("--context-cost-presets");
             if (options.context_cost_presets.empty()) {
@@ -344,12 +414,70 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--port must be in [1,65535]");
     }
     if (options.max_context == 0) { throw std::invalid_argument("--max-context must be positive"); }
-    if (options.kv_capacity.mode == KvCapacityMode::Explicit &&
-        options.kv_capacity.explicit_tokens < options.max_context) {
-        throw std::invalid_argument("--kv-capacity must be at least --max-context");
+    if (options.kv_sink % 128 != 0) {
+        throw std::invalid_argument("--kv-sink must be a multiple of 128");
+    }
+    const bool ws_enabled = options.kv_working_set != 0 || options.kv_working_set_auto;
+    if (ws_enabled) {
+        if (options.speculative.backend == SpeculativeBackend::Mtp) {
+            throw std::invalid_argument(
+                "--kv-working-set is mutually exclusive with MTP speculative decoding (--spec mtp); "
+                "dflash/dflash2 are supported");
+        }
+        if (!options.kv_working_set_auto) {
+            if (options.kv_working_set % 128 != 0) {
+                throw std::invalid_argument("--kv-working-set must be a multiple of 128");
+            }
+            if (options.kv_sink > options.kv_working_set) {
+                throw std::invalid_argument("--kv-sink must not exceed --kv-working-set");
+            }
+        }
+    }
+    // An explicit budget fixes the pool minimum to budget + one headroom chunk. Auto sizing
+    // derives its budget from the pool itself, so no fixed minimum is enforced here; the
+    // Program validates the minimum viable window once the pool is resolved.
+    std::uint64_t minimum_kv_capacity = options.max_context;
+    std::string minimum_kv_error = "--kv-capacity must be at least --max-context";
+    const bool enforce_pool_minimum = !options.kv_working_set_auto;
+    if (options.kv_working_set != 0) {
+        minimum_kv_capacity =
+            static_cast<std::uint64_t>(options.kv_working_set) + options.prefill_chunk;
+        minimum_kv_error =
+            "--kv-capacity must be at least --kv-working-set + --prefill-chunk";
+    }
+    if (enforce_pool_minimum && options.kv_capacity.mode == KvCapacityMode::Explicit &&
+        options.kv_capacity.explicit_tokens < minimum_kv_capacity) {
+        throw std::invalid_argument(minimum_kv_error);
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("--max-concurrency must be in [1,8]");
+    }
+    if (!options.kv_slot_percentages.empty()) {
+        // Sized-slots mode: one device-window percentage per concurrency lane.
+        if (options.kv_slot_percentages.size() != static_cast<std::size_t>(options.max_concurrency)) {
+            throw std::invalid_argument(
+                "--kv-slot-percentages must have exactly one entry per --max-concurrency lane");
+        }
+        double total = 0.0;
+        for (const double share : options.kv_slot_percentages) {
+            if (!(share > 0.0) || !(share <= 100.0)) {
+                throw std::invalid_argument("--kv-slot-percentages entries must be in (0,100]");
+            }
+            total += share;
+        }
+        if (total > 100.0 + 1e-6) {
+            throw std::invalid_argument("--kv-slot-percentages must sum to at most 100");
+        }
+        if (options.kv_working_set != 0) {
+            throw std::invalid_argument(
+                "--kv-slot-percentages is mutually exclusive with an explicit --kv-working-set "
+                "value");
+        }
+        if (options.speculative.backend == SpeculativeBackend::Mtp) {
+            throw std::invalid_argument(
+                "--kv-slot-percentages is mutually exclusive with MTP speculative decoding "
+                "(--spec mtp)");
+        }
     }
     if (options.max_pending_requests == 0) {
         throw std::invalid_argument("--max-pending-requests must be positive");

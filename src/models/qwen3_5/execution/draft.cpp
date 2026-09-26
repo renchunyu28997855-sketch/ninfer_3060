@@ -579,6 +579,7 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
 
         Tensor anchors            = frame.anchors.slice(0, 0, batch_size);
         Tensor frontiers          = frame.execution_frontiers.slice(0, 0, batch_size);
+        Tensor verify_bases       = frame.verify_base_positions.slice(0, 0, batch_size);
         Tensor context_starts     = frame.context_frontiers.slice(0, 0, batch_size);
         Tensor extents            = frame.proposal_extents.slice(0, 0, batch_size);
         Tensor valid_columns      = frame.target_valid_columns.slice(0, 0, batch_size);
@@ -612,7 +613,9 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                             state_destinations, dflash_rows, envelopes.append);
 
         propose_batch_impl(state, frame, batch_size, k, envelopes);
-        ops::speculative_prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
+        // Target verification consumes row-local KV bases (working-set remap, plan §2.2);
+        // the draft model above kept true positions.
+        ops::speculative_prepare_verify_inputs(anchors, drafts, verify_bases, extents, verify_ids,
                                                target_positions, state.execution.device.stream);
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,

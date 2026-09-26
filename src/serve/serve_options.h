@@ -34,6 +34,19 @@ struct ServeOptions {
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;
+    // Long-context working set: device-resident token budget for long histories (0 = off) and
+    // the always-resident leading sink. Host pool comes from --host-kv-mib or auto-sizing.
+    // "auto" sizing resolves the budget from the device KV pool at startup instead of a fixed
+    // --kv-working-set value; kv_sink_explicit records whether --kv-sink was given so the
+    // engine can derive the sink only when it was not.
+    std::uint32_t kv_working_set       = 0;
+    bool         kv_working_set_auto   = false;
+    std::uint8_t kv_ws_grant_mode      = 0; // 0 take-remaining | 1 fair-even | 2 elastic (auto only)
+    std::uint32_t kv_sink              = 2048;
+    bool         kv_sink_explicit      = false;
+    // Sized-slots mode: one device-window percentage (0,100] per concurrency lane. Non-empty
+    // selects per-lane fixed budgets and is mutually exclusive with --kv-working-set auto/explicit.
+    std::vector<double> kv_slot_percentages;
     std::filesystem::path context_cost_presets;
     std::uint32_t log_stats_interval_ms    = 5000; // 0 disables periodic Engine throughput logs
     std::size_t max_request_bytes          = kDefaultMaxRequestBytes;

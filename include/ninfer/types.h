@@ -148,6 +148,60 @@ struct ContextCostOptions {
     std::filesystem::path preset_path;
 };
 
+// Host KV working set: bounds each sequence's device-resident KV window and parks the
+// overflow on host memory at turn boundaries. Requires context_cache host KV capacity and
+// is mutually exclusive with MTP speculative decoding (dflash/dflash2 are supported).
+struct WorkingSetOptions {
+    bool enabled = false;
+    // Device-resident token budget. Absent means "auto": the Engine resolves the ceiling
+    // (min of max context and the device KV pool) at Program construction and grants each new
+    // session the remaining pool at admission time.
+    std::optional<std::uint32_t> budget_tokens;
+    // Always-resident leading sink. Absent means "derive" (a block-aligned quarter of the
+    // resolved budget, capped at 16K) when the budget is auto; explicit budgets keep the
+    // engine default when absent.
+    std::optional<std::uint32_t> sink_tokens;
+    // Per-lane fixed device-window budgets, each a percentage (0,100] of the device KV pool.
+    // Present (non-empty) selects "sized slots" mode: every concurrency lane gets an independent,
+    // predictable working-set ceiling instead of the arrival-order take-remaining grant of auto.
+    // The count must equal max_concurrency and the shares may sum to at most 100 (slack allowed).
+    std::optional<std::vector<double>> slot_percentages;
+    // Admission grant policy for auto-sized budgets: 0 = take-remaining (each new session grabs
+    // the free pool, latecomers queue), 1 = fair even split (pool / max_concurrency per session,
+    // deterministic, never over-subscribes), 2 = elastic (pool / current-active, low load gives
+    // each session more VRAM). Ignored unless the budget is auto-sized.
+    std::uint32_t grant_mode = 0;
+};
+
+// Resolved host-KV working-set configuration as built by one Program (the value an operator
+// sees at startup, distinct from the requested WorkingSetOptions): budget/sink in tokens,
+// auto_sized marks a budget derived from the device KV pool rather than an explicit value.
+struct WorkingSetConfig {
+    bool enabled        = false;
+    bool auto_sized     = false;
+    bool per_lane       = false; // sized-slots mode: fixed per-lane ceilings instead of one budget
+    std::uint32_t budget_tokens = 0;
+    std::uint32_t sink_tokens   = 0;
+    std::uint32_t grant_mode    = 0; // 0 take-remaining | 1 fair even | 2 elastic (auto only)
+    // Resolved per-lane device-window ceilings in tokens (sized-slots mode only, else empty).
+    std::vector<std::uint32_t> lane_budget_tokens;
+};
+
+// Monotonic working-set (host KV tier) activity counters accumulated by one Program.
+// Page counts are physical KV pages (64 tokens each); bytes/seconds cover the async
+// device<->Host copies issued by working-set remaps.
+struct WorkingSetStats {
+    std::uint64_t selections     = 0; // selection runs, including identity no-ops
+    std::uint64_t swaps          = 0; // remaps that moved at least one page
+    std::uint64_t demoted_pages  = 0; // device -> Host
+    std::uint64_t promoted_pages = 0; // Host -> device
+    std::uint64_t d2h_bytes      = 0;
+    std::uint64_t h2d_bytes      = 0;
+    double d2h_seconds           = 0.0;
+    double h2d_seconds           = 0.0;
+    double selection_seconds     = 0.0;
+};
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -161,6 +215,7 @@ struct EngineOptions {
     std::uint32_t prefill_chunk        = 1024;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
+    WorkingSetOptions working_set;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
     // Zero selects a bounded worker count from the detected host concurrency.
@@ -949,6 +1004,15 @@ struct RuntimeStats {
     double backend_kv_d2h_seconds      = 0.0;
     double backend_kv_h2d_seconds      = 0.0;
     double backend_kv_d2d_seconds      = 0.0;
+    std::uint64_t working_set_selections         = 0;
+    std::uint64_t working_set_swaps              = 0;
+    std::uint64_t working_set_demoted_pages      = 0;
+    std::uint64_t working_set_promoted_pages    = 0;
+    std::uint64_t working_set_d2h_bytes          = 0;
+    std::uint64_t working_set_h2d_bytes          = 0;
+    double working_set_d2h_seconds               = 0.0;
+    double working_set_h2d_seconds               = 0.0;
+    double working_set_selection_seconds         = 0.0;
 
     std::uint64_t pressure_spill_pages                 = 0;
     std::uint64_t partial_tail_cow_pages               = 0;
@@ -1010,6 +1074,16 @@ struct LoadSummary {
     std::size_t device_object_count    = 0;
     std::size_t host_object_count      = 0;
     ContextCostSummary context_cost;
+    // Resolved host-KV working-set configuration (all zero / disabled when the tier is off).
+    // budget/sink are tokens; auto_sized marks a budget derived from the device pool rather
+    // than an explicit --kv-working-set value.
+    bool working_set_enabled           = false;
+    bool working_set_auto              = false;
+    bool working_set_per_lane          = false; // sized-slots mode
+    std::uint32_t working_set_grant_mode    = 0; // auto grant: 0 take-remaining | 1 fair-even | 2 elastic
+    std::uint32_t working_set_budget_tokens = 0;
+    std::uint32_t working_set_sink_tokens   = 0;
+    std::vector<std::uint32_t> working_set_lane_budget_tokens; // per-lane ceilings (sized slots)
 };
 
 } // namespace ninfer

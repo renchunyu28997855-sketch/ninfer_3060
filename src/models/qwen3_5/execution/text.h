@@ -101,6 +101,10 @@ public:
         prefill_split_frontier_ = position;
     }
 
+    // True-space RoPE base for prefill; defaults to the cache base and diverges only under a
+    // working-set session, where the cache base is row-local but RoPE keeps true positions.
+    void set_text_rope_base(std::uint32_t base) noexcept { text_rope_base_ = base; }
+
     void set_rewrite_checkpoint_hidden_output(Tensor* output) noexcept {
         rewrite_checkpoint_hidden_output_ = output;
     }
@@ -230,6 +234,7 @@ private:
     Tensor& prefill_hidden_;
     std::uint32_t prefill_chunk_;
     std::uint32_t text_kv_base_;
+    std::uint32_t text_rope_base_;
     const Tensor* active_cache_positions_                                          = nullptr;
     const Tensor* active_rope_positions_                                           = nullptr;
     const Tensor* active_kv_table_rows_                                            = nullptr;
