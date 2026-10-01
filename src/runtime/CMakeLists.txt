@@ -4,6 +4,7 @@ add_library(ninfer_runtime_support STATIC
   engine/context_cache/context_cost_defaults.cpp
   engine/kv_capacity.cpp
   engine/public_types.cpp
+  engine/suffix_drafter.cpp
 )
 ninfer_internal_includes(ninfer_runtime_support)
 target_link_libraries(ninfer_runtime_support PUBLIC ninfer_core PRIVATE ninfer::json)

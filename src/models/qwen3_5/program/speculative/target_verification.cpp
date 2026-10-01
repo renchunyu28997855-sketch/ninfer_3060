@@ -26,8 +26,8 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
     if (frame.proposal_q.data != nullptr) {
         ops::speculative_accept_sparse_drafts(
             frame.target_tokens, frame.target_logits, frame.drafts, frame.candidate_ids,
-            frame.proposal_q, frame.current_extents, frame.frontiers, frame.anchors,
-            frame.licensed_tokens, frame.licensed_counts, frame.accepted_drafts,
+            frame.proposal_q, frame.current_extents, frame.host_proposals, frame.frontiers,
+            frame.anchors, frame.licensed_tokens, frame.licensed_counts, frame.accepted_drafts,
             dimension(execution.parameters.model.resources().public_token_count), frame.sampling,
             {false}, execution.work, execution.device.stream);
     } else {

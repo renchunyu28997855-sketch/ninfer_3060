@@ -180,8 +180,9 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
 void speculative_accept_sparse_drafts(
     const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
     const Tensor& candidate_ids, const Tensor& proposal_q, const Tensor& current_extents,
-    Tensor& round_lengths, Tensor& round_anchors, Tensor& licensed_tokens, Tensor& licensed_counts,
-    Tensor& accepted_drafts, std::int32_t token_domain, const SamplingConfig* configs,
+    const Tensor& host_proposals, Tensor& round_lengths, Tensor& round_anchors,
+    Tensor& licensed_tokens, Tensor& licensed_counts, Tensor& accepted_drafts,
+    std::int32_t token_domain, const SamplingConfig* configs,
     SpeculativeAcceptExecutionEnvelope envelope, WorkspaceArena& workspace, cudaStream_t stream) {
     constexpr const char* op = "speculative_accept_sparse_drafts";
     if (token_domain != kSparseTokenDomain) {
@@ -202,6 +203,9 @@ void speculative_accept_sparse_drafts(
     require_tensor3(candidate_ids, DType::I32, kSparseCandidates, k, batch, op, "candidate_ids");
     require_tensor3(proposal_q, DType::FP32, kSparseCandidates, k, batch, op, "proposal_q");
     require_vector(current_extents, DType::I32, batch, op, "current_extents");
+    if (host_proposals.data != nullptr) {
+        require_vector(host_proposals, DType::I32, batch, op, "host_proposals");
+    }
     require_vector(round_lengths, DType::I32, batch, op, "round_lengths");
     require_vector(round_anchors, DType::I32, batch, op, "round_anchors");
     require_matrix(licensed_tokens, DType::I32, columns, batch, op, "licensed_tokens");
@@ -216,8 +220,9 @@ void speculative_accept_sparse_drafts(
         token_domain, envelope, k, k, batch, batch);
     const DeviceSpan scratch = bytes == 0 ? DeviceSpan{} : workspace.alloc_bytes(bytes);
     detail::speculative_accept_sparse_drafts_launch(
-        target_tokens, logits, drafts, candidate_ids, proposal_q, current_extents, round_lengths,
-        round_anchors, licensed_tokens, licensed_counts, accepted_drafts, token_domain, configs,
+        target_tokens, logits, drafts, candidate_ids, proposal_q, current_extents,
+        static_cast<const std::int32_t*>(host_proposals.data), round_lengths, round_anchors,
+        licensed_tokens, licensed_counts, accepted_drafts, token_domain, configs,
         envelope.all_rows_greedy_without_penalties, scratch, stream);
 }
 
@@ -250,6 +255,31 @@ void proposal_remap_token_ids(Tensor& proposal_tokens, const std::int32_t* id_ma
         throw std::invalid_argument("proposal_remap_token_ids: id_map must be non-null and n>0");
     }
     detail::proposal_remap_token_ids_launch(proposal_tokens, id_map, n, stream);
+}
+
+void speculative_apply_host_proposals(const Tensor& host_flags, const Tensor& host_extents,
+                                      const std::int32_t* host_tokens, std::int32_t k_max,
+                                      Tensor& drafts, Tensor& current_extents,
+                                      cudaStream_t stream) {
+    constexpr const char* op = "speculative_apply_host_proposals";
+    const std::int32_t k     = drafts.ne[0];
+    const std::int32_t batch = drafts.ne[1];
+    if (k < 1) { throw std::invalid_argument("speculative_apply_host_proposals: K must be >=1"); }
+    if (batch < 1) {
+        throw std::invalid_argument("speculative_apply_host_proposals: B must be >=1");
+    }
+    if (k_max < k || k_max < 1) {
+        throw std::invalid_argument("speculative_apply_host_proposals: k_max must be >=K");
+    }
+    require_vector(host_flags, DType::I32, batch, op, "host_flags");
+    require_vector(host_extents, DType::I32, batch, op, "host_extents");
+    if (host_tokens == nullptr) {
+        throw std::invalid_argument("speculative_apply_host_proposals: host_tokens must be non-null");
+    }
+    require_matrix(drafts, DType::I32, k, batch, op, "drafts");
+    require_vector(current_extents, DType::I32, batch, op, "current_extents");
+    detail::speculative_apply_host_proposals_launch(
+        host_flags, host_extents, host_tokens, k_max, drafts, current_extents, stream);
 }
 
 } // namespace ninfer::ops

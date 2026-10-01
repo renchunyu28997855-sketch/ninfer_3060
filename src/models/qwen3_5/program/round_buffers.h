@@ -92,6 +92,12 @@ struct DFlashDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> state_source_slots{};
     std::array<std::int32_t, kMaximumConcurrency> state_destination_slots{};
     std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    // Zero-parameter suffix-lookup proposals: rows with flag=1 replace the on-device
+    // DFlash proposal columns with these host-side tokens (the drafter head output for
+    // those rows is discarded); extent bounds how many of the k columns are valid.
+    std::array<std::int32_t, kMaximumConcurrency> host_proposal_flags{};
+    std::array<std::int32_t, kMaximumConcurrency> host_proposal_extents{};
+    std::array<TokenId, kMaximumConcurrency * kDFlashDecodeMaximumDrafts> host_proposal_tokens{};
 };
 
 struct DFlashDecodeEgress {
@@ -274,6 +280,8 @@ struct DFlashDecodeState {
     Tensor active_lanes;
     Tensor state_source_slots;
     Tensor state_destination_slots;
+    Tensor host_proposal_flags;
+    Tensor host_proposal_extents;
     const ops::SamplingConfig* sampling = nullptr;
     Tensor licensed_tokens;
     Tensor licensed_counts;

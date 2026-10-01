@@ -60,6 +60,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       shared_prefix_capacity(plan.context_cache.max_shared_prefixes.value_or(0)),
       prefill_chunk(plan.prefill_chunk), draft_window(plan.draft_window),
       speculative_backend(plan.speculative_backend), kv_storage(plan.kv_storage),
+      suffix_drafter(plan.suffix_drafter), suffix_min_match(plan.suffix_min_match),
       proposal_head(plan.proposal_head), vision_enabled(plan.features.vision),
       use_cuda_graph(plan.use_cuda_graph), causal_scoring(plan.causal_scoring),
       kv_payload_bytes(plan.persistent.kv_payload_bytes),

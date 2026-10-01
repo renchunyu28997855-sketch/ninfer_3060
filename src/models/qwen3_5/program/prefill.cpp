@@ -672,6 +672,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         sequence.mtp_draft_count     = 0;
         sequence.tail_hidden_valid   = base == prompt_tokens && sequence.tail_hidden_valid;
         sequence.ledger.swap(materialization_ledger_);
+        seed_suffix_drafter(sequence);
         sequence.prefix_identity.swap(materialization_identity_);
         sequence.prefix_digests.swap(materialization_prefix_digests_);
         sequence.rebuild_work       = request_plan.root_rebuild_work;
@@ -931,6 +932,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                     ? mtp_host_egress->licensed_tokens.data() + row * width
                     : dflash_host_egress->licensed_tokens.data() + row * width;
             sequence.ledger.insert(sequence.ledger.end(), token_base, token_base + committed);
+            append_suffix_tokens(sequence, std::span<const TokenId>(token_base, committed));
             commit_generated_prefix_identity(sequence, pending.base_S,
                                              std::span<const TokenId>(token_base, committed),
                                              prefix_execution_splits[row]);
@@ -1233,6 +1235,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             throw std::logic_error("candidate token ledger does not match prompt length");
         }
         sequence.ledger.push_back(host_tokens[0]);
+        append_suffix_tokens(sequence, std::span<const TokenId>(host_tokens, 1));
         sequence.prefix_identity.append_generated(1, sequence.rope_delta);
         sequence.prefix_digests.append_generated(std::span<const TokenId>(host_tokens, 1),
                                                  sequence.rope_delta);

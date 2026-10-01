@@ -89,7 +89,7 @@ void speculative_accept_greedy_drafts_launch(const Tensor& target_tokens, const 
     speculative_sampling_group_finalize_kernel<false>
         <<<batched_group_grid, kSamplerGroupBlock, 0, stream>>>(
             static_cast<const std::int32_t*>(target_tokens.data),
-            static_cast<const std::int32_t*>(drafts.data), nullptr, nullptr,
+            static_cast<const std::int32_t*>(drafts.data), nullptr, nullptr, nullptr,
             static_cast<const std::int32_t*>(current_extents.data),
             static_cast<std::int32_t*>(lengths.data), static_cast<std::int32_t*>(anchors.data),
             static_cast<std::int32_t*>(licensed_tokens.data),
@@ -102,9 +102,10 @@ void speculative_accept_greedy_drafts_launch(const Tensor& target_tokens, const 
 void speculative_accept_sparse_drafts_launch(
     const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
     const Tensor& candidate_ids, const Tensor& proposal_q, const Tensor& current_extents,
-    Tensor& round_lengths, Tensor& round_anchors, Tensor& licensed_tokens, Tensor& licensed_counts,
-    Tensor& accepted_drafts, std::int32_t token_domain, const SamplingConfig* configs,
-    bool raw_greedy, DeviceSpan workspace, cudaStream_t stream) {
+    const std::int32_t* host_proposals, Tensor& round_lengths, Tensor& round_anchors,
+    Tensor& licensed_tokens, Tensor& licensed_counts, Tensor& accepted_drafts,
+    std::int32_t token_domain, const SamplingConfig* configs, bool raw_greedy, DeviceSpan workspace,
+    cudaStream_t stream) {
     const std::int32_t batch = drafts.ne[1];
     const std::int32_t k     = drafts.ne[0];
     const std::int32_t cols  = k + 1;
@@ -138,7 +139,7 @@ void speculative_accept_sparse_drafts_launch(
         static_cast<const std::int32_t*>(target_tokens.data),
         static_cast<const std::int32_t*>(drafts.data),
         static_cast<const std::int32_t*>(candidate_ids.data),
-        static_cast<const float*>(proposal_q.data),
+        static_cast<const float*>(proposal_q.data), host_proposals,
         static_cast<const std::int32_t*>(current_extents.data),
         static_cast<std::int32_t*>(round_lengths.data),
         static_cast<std::int32_t*>(round_anchors.data),
@@ -171,6 +172,22 @@ void proposal_remap_token_ids_launch(Tensor& proposal_tokens, const std::int32_t
     const int grid       = std::max(1, div_up(count, kBlock));
     proposal_remap_token_ids_kernel<<<grid, kBlock, 0, stream>>>(
         static_cast<std::int32_t*>(proposal_tokens.data), count, id_map, n);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void speculative_apply_host_proposals_launch(const Tensor& host_flags, const Tensor& host_extents,
+                                             const std::int32_t* host_tokens, std::int32_t k_max,
+                                             Tensor& drafts, Tensor& current_extents,
+                                             cudaStream_t stream) {
+    constexpr int kBlock = 32;
+    const int k          = drafts.ne[0];
+    const int batch      = drafts.ne[1];
+    const dim3 grid(static_cast<unsigned int>(div_up(k, kBlock)), static_cast<unsigned int>(batch));
+    speculative_apply_host_proposals_kernel<<<grid, kBlock, 0, stream>>>(
+        static_cast<const std::int32_t*>(host_flags.data),
+        static_cast<const std::int32_t*>(host_extents.data), host_tokens,
+        static_cast<std::int32_t*>(drafts.data), k, k_max,
+        static_cast<std::int32_t*>(current_extents.data));
     CUDA_CHECK(cudaGetLastError());
 }
 

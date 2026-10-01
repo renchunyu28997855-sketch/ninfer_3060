@@ -459,6 +459,20 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.speculative_draft_tokens    = result.speculative.drafted_tokens;
     outcome.metrics.speculative_accepted_tokens = result.speculative.accepted_tokens;
     outcome.metrics.speculative_fallback_steps  = result.speculative.fallback_steps;
+    outcome.metrics.speculative_suffix_rounds          = result.speculative.suffix_rounds;
+    outcome.metrics.speculative_suffix_draft_tokens    =
+        result.speculative.suffix_drafted_tokens;
+    outcome.metrics.speculative_suffix_accepted_tokens =
+        result.speculative.suffix_accepted_tokens;
+    outcome.metrics.speculative_suffix_k_sum           = result.speculative.suffix_k_sum;
+    outcome.metrics.speculative_suffix_k_max           = result.speculative.suffix_k_max;
+    outcome.metrics.speculative_suffix_probe_rounds    = result.speculative.suffix_probe_rounds;
+    outcome.metrics.speculative_suffix_first_accept    = result.speculative.suffix_first_accept;
+    outcome.metrics.speculative_suffix_match_sum       = result.speculative.suffix_match_sum;
+    outcome.metrics.speculative_suffix_match_max       = result.speculative.suffix_match_max;
+    outcome.metrics.speculative_suffix_reject_warmup   = result.speculative.suffix_reject_warmup;
+    outcome.metrics.speculative_suffix_reject_floor    = result.speculative.suffix_reject_floor;
+    outcome.metrics.speculative_suffix_reject_margin   = result.speculative.suffix_reject_margin;
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
 

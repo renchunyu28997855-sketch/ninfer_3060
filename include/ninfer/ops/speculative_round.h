@@ -116,7 +116,10 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   then emit that argmax as correction/bonus. Positive-temperature rows construct p
  *   using sampling.h penalties and filters. A live draft d is accepted with probability
  *   min(1,p(d)/q(d)); first rejection samples normalized max(p-q,0). After accepting all
- *   P drafts, the terminal token is sampled from target column P.
+ *   P drafts, the terminal token is sampled from target column P. A row whose
+ *   host_proposals flag is non-zero carries deterministic lookup proposals instead of sampled
+ *   ones, so its draft distribution is one-hot at the drafted token: d is accepted with
+ *   probability p(d) and a rejection subtracts exactly d's mass.
  *
  * Logical shapes and registered profile:
  *   All Tensor storage is contiguous. target_tokens/licensed_tokens are I32 [K+1,B].
@@ -126,6 +129,9 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   The registered domain is token_domain=248077, K=1..15, B=1..8. Each live draft
  *   position has distinct global candidate ids in [0,token_domain). proposal_q is the
  *   normalized FP32 distribution used to draw that draft; the draft occurs with positive q.
+ *   host_proposals is I32 [B] and may be an empty Tensor, which treats every row as
+ *   sampled-proposal. A non-zero entry marks that row's live drafts as deterministic host
+ *   proposals, whose one-hot q is used instead of candidate_ids/proposal_q.
  *   For greedy rows without penalties, live target_tokens are the unpenalized target argmax
  *   over the valid token domain, with lower ids breaking ties.
  *
@@ -156,8 +162,9 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
 void speculative_accept_sparse_drafts(
     const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
     const Tensor& candidate_ids, const Tensor& proposal_q, const Tensor& current_extents,
-    Tensor& round_lengths, Tensor& round_anchors, Tensor& licensed_tokens, Tensor& licensed_counts,
-    Tensor& accepted_drafts, std::int32_t token_domain, const SamplingConfig* configs,
+    const Tensor& host_proposals, Tensor& round_lengths, Tensor& round_anchors,
+    Tensor& licensed_tokens, Tensor& licensed_counts, Tensor& accepted_drafts,
+    std::int32_t token_domain, const SamplingConfig* configs,
     SpeculativeAcceptExecutionEnvelope envelope, WorkspaceArena& workspace, cudaStream_t stream);
 
 /**
@@ -187,5 +194,27 @@ void speculative_select_accepted_hidden(const Tensor& hidden, const Tensor& sele
  */
 void proposal_remap_token_ids(Tensor& proposal_tokens, const std::int32_t* id_map,
                               std::int32_t count, cudaStream_t stream);
+
+/**
+ * Op: speculative_apply_host_proposals
+ *
+ * Math / indexing:
+ *   Independently per row b: when host_flags[b] != 0, let P = clamp(host_extents[b],0,K). For
+ *   0<=j<K: drafts[j,b]' = host_tokens[b*k_max+j] when j<P, else drafts[j,b]; and
+ *   current_extents[b]' = P. Rows with host_flags[b] == 0 are left untouched (both drafts and
+ *   current_extents).
+ *
+ * Logical shapes:
+ *   drafts is contiguous I32 [K,B]; host_flags/current_extents are I32 [B]; host_tokens is a
+ *   device I32 array [B,k_max] (row-major per row) with k_max>=K and k_max>=1. K>=1, B>=1.
+ *   All tensors are distinct except the in-place drafts/current_extents outputs.
+ *
+ * Effects:
+ *   Overwrites exactly the flagged rows' draft columns and their extent; unflagged rows and all
+ *   other inputs remain unchanged. No workspace.
+ */
+void speculative_apply_host_proposals(const Tensor& host_flags, const Tensor& host_extents,
+                                     const std::int32_t* host_tokens, std::int32_t k_max,
+                                     Tensor& drafts, Tensor& current_extents, cudaStream_t stream);
 
 } // namespace ninfer::ops

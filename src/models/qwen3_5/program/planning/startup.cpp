@@ -817,6 +817,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->draft_window        = inputs.draft_window;
     impl->speculative_backend = inputs.speculative_backend;
+    impl->suffix_drafter      = inputs.suffix_drafter;
+    impl->suffix_min_match    = inputs.suffix_min_match;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
     impl->use_cuda_graph      = inputs.use_cuda_graph;
@@ -947,6 +949,8 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
         .draft_window        = options.speculative.draft_tokens,
         .speculative_backend = options.speculative.backend,
+        .suffix_drafter      = options.speculative.suffix_drafter,
+        .suffix_min_match    = options.speculative.suffix_min_match,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,
         .features            = models::load_options(options),

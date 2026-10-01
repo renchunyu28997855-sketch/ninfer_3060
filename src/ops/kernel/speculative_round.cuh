@@ -97,6 +97,25 @@ __device__ __forceinline__ float speculative_sparse_probability(const std::int32
     return probability;
 }
 
+// Draft distribution of the proposal at `position` for `token`. Learned proposals were sampled from
+// the head distribution reported by candidate_ids/proposal_q, so they must be validated against it.
+// Host proposals (a lookup table hit) are deterministic tokens, not samples: their distribution is
+// one-hot at the proposed token. Validating them against the head's q instead would accept every
+// proposal the target likes at least as much as the head does (and every proposal outside the head's
+// candidate set unconditionally, since a missed lookup yields q = 0), forcing copies of the prompt
+// into the output. The one-hot q removes that bias while keeping the residual correction exact:
+// accept with probability p(token), and on rejection subtract exactly the proposed token's mass.
+__device__ __forceinline__ float speculative_draft_q(const std::int32_t* candidate_ids,
+                                                     const float* proposal_q, const int* drafts,
+                                                     int row, int k, int position, int token,
+                                                     bool host_proposal) {
+    if (host_proposal) {
+        return token == drafts[row * k + position] ? 1.0f : 0.0f;
+    }
+    const int at = (row * k + position) * kSparseSpeculativeCandidates;
+    return speculative_sparse_probability(candidate_ids + at, proposal_q + at, token);
+}
+
 // One warp owns a request. Each draft's acceptance event is independent given the provided
 // path and its conditional p/q distributions; the first failed event determines the prefix.
 __device__ __forceinline__ void speculative_sparse_warp_store(const int* drafts, int k, int row,
@@ -143,11 +162,13 @@ __global__ __launch_bounds__(256) void speculative_accept_sparse_warp_greedy_ker
 
 __device__ __forceinline__ void speculative_sparse_warp_accept(
     SamplingWorkspace workspace, const int* drafts, const int* candidate_ids,
-    const float* proposal_q, const SamplingConfig& cfg, int k, int row, int extent, bool greedy,
-    int* lengths, int* anchors, int* licensed_tokens, int* licensed_counts, int* accepted) {
-    const int lane       = threadIdx.x & 31;
-    const int old_length = lengths[row];
-    bool reject          = false;
+    const float* proposal_q, const std::int32_t* host_proposals, const SamplingConfig& cfg, int k,
+    int row, int extent, bool greedy, int* lengths, int* anchors, int* licensed_tokens,
+    int* licensed_counts, int* accepted) {
+    const int lane         = threadIdx.x & 31;
+    const int old_length   = lengths[row];
+    const bool host_proposal = host_proposals != nullptr && host_proposals[row] != 0;
+    bool reject            = false;
     if (lane < extent) {
         const int d = drafts[row * k + lane];
         if (greedy)
@@ -162,8 +183,8 @@ __device__ __forceinline__ void speculative_sparse_warp_accept(
                     break;
                 }
             }
-            const int at   = (row * k + lane) * kSparseSpeculativeCandidates;
-            const float qd = speculative_sparse_probability(candidate_ids + at, proposal_q + at, d);
+            const float qd = speculative_draft_q(candidate_ids, proposal_q, drafts, row, k, lane, d,
+                                                 host_proposal);
             const float u  = sampling_uniform(cfg.seed, old_length + lane + 1,
                                               kSamplePurposeSpeculativeAccept, 0);
             reject         = !(pd >= qd || u * qd < pd);
@@ -183,10 +204,9 @@ __device__ __forceinline__ void speculative_sparse_warp_accept(
             token        = workspace.dist_idx[at];
             weight       = workspace.dist_prob[at];
             if (a < extent) {
-                const int q_at = (row * k + a) * kSparseSpeculativeCandidates;
-                weight         = fmaxf(weight - speculative_sparse_probability(candidate_ids + q_at,
-                                                                               proposal_q + q_at, token),
-                                       0.0f);
+                weight = fmaxf(weight - speculative_draft_q(candidate_ids, proposal_q, drafts, row, k,
+                                                            a, token, host_proposal),
+                               0.0f);
             }
         }
         float cdf = weight;
@@ -457,7 +477,8 @@ __launch_bounds__(kSamplerBlock) __global__ void speculative_sampling_partial_to
 template <bool SparseProposal>
 __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group_finalize_kernel(
     const std::int32_t* target_tokens, const std::int32_t* drafts,
-    const std::int32_t* candidate_ids, const float* proposal_q, const std::int32_t* current_extents,
+    const std::int32_t* candidate_ids, const float* proposal_q,
+    const std::int32_t* host_proposals, const std::int32_t* current_extents,
     std::int32_t* lengths, std::int32_t* anchors, std::int32_t* licensed_tokens,
     std::int32_t* licensed_counts, std::int32_t* accepted, const SamplingConfig* configs,
     std::int32_t token_domain, std::int32_t cols, std::int32_t partial_blocks,
@@ -576,9 +597,9 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
             }
             __syncthreads();
             if (last_column && tid < 32)
-                speculative_sparse_warp_accept(workspace, drafts, candidate_ids, proposal_q, cfg, k,
-                                               row, extent, true, lengths, anchors, licensed_tokens,
-                                               licensed_counts, accepted);
+                speculative_sparse_warp_accept(workspace, drafts, candidate_ids, proposal_q,
+                                               host_proposals, cfg, k, row, extent, true, lengths,
+                                               anchors, licensed_tokens, licensed_counts, accepted);
             if (last_column && tid == 0) *workspace.speculative_finalize_count = 0;
             return;
         }
@@ -596,9 +617,9 @@ __launch_bounds__(kSamplerGroupBlock) __global__ void speculative_sampling_group
         }
         __syncthreads();
         if (last_column && tid < 32)
-            speculative_sparse_warp_accept(workspace, drafts, candidate_ids, proposal_q, cfg, k,
-                                           row, extent, false, lengths, anchors, licensed_tokens,
-                                           licensed_counts, accepted);
+            speculative_sparse_warp_accept(workspace, drafts, candidate_ids, proposal_q,
+                                           host_proposals, cfg, k, row, extent, false, lengths,
+                                           anchors, licensed_tokens, licensed_counts, accepted);
         if (last_column && tid == 0) *workspace.speculative_finalize_count = 0;
         return;
     } else {
@@ -706,6 +727,27 @@ __global__ void proposal_remap_token_ids_kernel(std::int32_t* proposal_tokens,
     if (i >= proposal_count) { return; }
     const int idx = proposal_tokens[i];
     if (idx >= 0 && idx < n) { proposal_tokens[i] = id_map[idx]; }
+}
+
+// One thread per (column, row): flagged rows take their draft columns from the host-side
+// suffix-lookup table (row-major [B,k_max]) and clamp the live extent; unflagged rows keep the
+// on-device drafter output.
+__global__ void speculative_apply_host_proposals_kernel(const std::int32_t* host_flags,
+                                                        const std::int32_t* host_extents,
+                                                        const std::int32_t* host_tokens,
+                                                        std::int32_t* drafts, std::int32_t k,
+                                                        std::int32_t k_max,
+                                                        std::int32_t* current_extents) {
+    const int row = static_cast<int>(blockIdx.y);
+    if (host_flags[row] == 0) { return; }
+    const int n = host_extents[row] < 0 ? 0 : (host_extents[row] > k ? k : host_extents[row]);
+    if (current_extents != nullptr && threadIdx.x == 0) { current_extents[row] = n; }
+    for (int j = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x; j < k;
+         j += static_cast<int>(blockDim.x) * gridDim.x) {
+        drafts[static_cast<std::int64_t>(row) * k + j] =
+            j < n ? host_tokens[static_cast<std::int64_t>(row) * k_max + j]
+                  : drafts[static_cast<std::int64_t>(row) * k + j];
+    }
 }
 
 } // namespace ninfer::ops

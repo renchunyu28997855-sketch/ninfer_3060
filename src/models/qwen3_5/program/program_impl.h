@@ -21,6 +21,7 @@
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/program/vision_prefill.h"
+#include "runtime/engine/suffix_drafter.h"
 
 #include <algorithm>
 #include <chrono>
@@ -379,6 +380,9 @@ struct SequenceState {
     std::vector<std::uint32_t> shared_prefix_references;
     runtime::PrefillWork rebuild_work;
     std::uint32_t rebuild_tail_begin = 0;
+    // Zero-parameter suffix draft source (see runtime/engine/suffix_drafter.h).
+    std::optional<runtime::SuffixDrafter> suffix_drafter;
+    std::optional<runtime::SuffixDraftPolicy> suffix_policy;
 };
 
 struct SharedPrefixState {
@@ -598,6 +602,9 @@ public:
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
     const SpeculativeBackend speculative_backend;
+    // Suffix draft source gate: enabled under --spec mtp / --spec dflash2.
+    bool suffix_drafter     = false;
+    std::uint32_t suffix_min_match = 4;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
     const bool vision_enabled;
@@ -1221,6 +1228,8 @@ private:
                             std::uint32_t backend_tokens = 0);
     void apply_sequence_working_set(SequenceState& sequence, const WorkingSetPolicy& policy);
     void maybe_apply_working_set(SequenceState& sequence);
+    void seed_suffix_drafter(SequenceState& sequence);
+    void append_suffix_tokens(SequenceState& sequence, std::span<const TokenId> tokens);
     void record_working_set_selection(std::chrono::steady_clock::time_point started) noexcept;
     [[nodiscard]] std::uint32_t kv_row_coordinate(const SequenceState& sequence,
                                                   std::uint32_t true_tokens) const;

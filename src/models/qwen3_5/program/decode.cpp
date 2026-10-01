@@ -378,6 +378,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             sequence.text_kv_valid = base_E + 1;
             commit_sequence_kv(sequence, sequence.text_kv_valid, 0);
             maybe_apply_working_set(sequence);
+            append_suffix_tokens(sequence, std::span<const TokenId>(&token, 1));
             sequence.tail_hidden_valid = true;
             sequence.ledger.push_back(token);
             sequence.prefix_identity.append_generated(1, sequence.rope_delta);
@@ -468,16 +469,62 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                                        capacity);
         }
 
+        // Zero-parameter suffix-lookup draft source: when planned on, each row may take its
+        // verify window from the sequence's own history (zero model cost) instead of the MTP
+        // head, while the per-sequence cost-model gate favors it.
+        const bool suffix_enabled = suffix_drafter;
+        std::vector<bool> row_suffix_used(lanes.size(), false);
+        std::vector<bool> row_suffix_probe(lanes.size(), false);
+        std::vector<std::uint32_t> row_suffix_match(lanes.size(), 0);
+
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence           = active_sequence(lanes[row]);
-            const RequestControl& request     = requests[lanes[row]];
+            RequestControl& request     = requests[lanes[row]];
             const std::uint32_t frontier      = sequence.execution_frontier;
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1
                                                     : 0;
-            const std::uint32_t extent =
+            std::uint32_t extent =
                 std::min({sequence.mtp_draft_count, draft_window, max_by_budget,
                           capacity - sequence.execution_frontier - 1});
+            const TokenId* suffix_tokens = nullptr;
+            if (suffix_enabled && sequence.suffix_drafter && sequence.suffix_policy) {
+                const runtime::SuffixDrafter::Proposal proposal =
+                    sequence.suffix_drafter->propose();
+                if (proposal.length > 0) {
+                    const auto decision =
+                        sequence.suffix_policy->decide(proposal.match_length);
+                    switch (decision) {
+                    case runtime::SuffixDraftPolicy::Decision::Warmup:
+                        request.speculative_stats.suffix_reject_warmup += 1;
+                        break;
+                    case runtime::SuffixDraftPolicy::Decision::Floor:
+                        request.speculative_stats.suffix_reject_floor += 1;
+                        break;
+                    case runtime::SuffixDraftPolicy::Decision::Margin:
+                        request.speculative_stats.suffix_reject_margin += 1;
+                        break;
+                    case runtime::SuffixDraftPolicy::Decision::No:
+                    case runtime::SuffixDraftPolicy::Decision::Probe:
+                    case runtime::SuffixDraftPolicy::Decision::Adopt:
+                        break;
+                    }
+                    if (decision == runtime::SuffixDraftPolicy::Decision::Probe ||
+                        decision == runtime::SuffixDraftPolicy::Decision::Adopt) {
+                        const std::uint32_t suffix_extent = std::min(
+                            {proposal.length, draft_window, max_by_budget,
+                             capacity - sequence.execution_frontier - 1});
+                        if (suffix_extent > 0) {
+                            extent               = suffix_extent;
+                            suffix_tokens        = proposal.tokens;
+                            row_suffix_used[row]  = true;
+                            row_suffix_probe[row] =
+                                decision == runtime::SuffixDraftPolicy::Decision::Probe;
+                            row_suffix_match[row] = proposal.match_length;
+                        }
+                    }
+                }
+            }
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
             mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
             mtp_host_ingress->remaining_budgets[row] =
@@ -486,7 +533,9 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             mtp_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1);
             for (std::uint32_t j = 0; j < draft_window; ++j) {
                 mtp_host_ingress->current_drafts[row * draft_window + j] =
-                    j < extent ? sequence.mtp_drafts[j] : sequence.ledger.back();
+                    j < extent ? (suffix_tokens != nullptr ? suffix_tokens[j]
+                                                           : sequence.mtp_drafts[j])
+                               : sequence.ledger.back();
             }
             for (std::uint32_t j = 0; j < width; ++j) {
                 const std::uint32_t position = frontier + std::min(j, extent);
@@ -561,6 +610,30 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                     request.speculative_stats.accepted_per_position[static_cast<std::size_t>(i)] +=
                         1;
                 }
+            }
+            if (row_suffix_used[row]) {
+                request.speculative_stats.suffix_rounds += 1;
+                request.speculative_stats.suffix_drafted_tokens += pcur;
+                request.speculative_stats.suffix_accepted_tokens +=
+                    static_cast<std::uint32_t>(accepted_i);
+                request.speculative_stats.suffix_k_sum += pcur;
+                request.speculative_stats.suffix_k_max =
+                    std::max(request.speculative_stats.suffix_k_max, pcur);
+                request.speculative_stats.suffix_match_sum += row_suffix_match[row];
+                request.speculative_stats.suffix_match_max =
+                    std::max(request.speculative_stats.suffix_match_max,
+                             row_suffix_match[row]);
+                if (row_suffix_probe[row]) {
+                    request.speculative_stats.suffix_probe_rounds += 1;
+                }
+                if (accepted_i > 0) {
+                    request.speculative_stats.suffix_first_accept += 1;
+                }
+                sequence.suffix_policy->observe_suffix(
+                    static_cast<std::uint32_t>(accepted_i), pcur, row_suffix_match[row]);
+            } else if (sequence.suffix_policy) {
+                sequence.suffix_policy->observe_learned(
+                    static_cast<std::uint32_t>(accepted_i), pcur);
             }
             request.pending = PendingCandidate{
                 .kind          = PendingKind::Speculative,
@@ -666,15 +739,59 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                                      draft_window + 1ULL))};
         }
 
+        // Zero-parameter suffix-lookup draft source (same gate as the MTP path).
+        const bool suffix_enabled = suffix_drafter;
+        std::vector<bool> row_suffix_used(lanes.size(), false);
+        std::vector<bool> row_suffix_probe(lanes.size(), false);
+        std::vector<std::uint32_t> row_suffix_match(lanes.size(), 0);
+
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence           = active_sequence(lanes[row]);
-            const RequestControl& request     = requests[lanes[row]];
+            RequestControl& request     = requests[lanes[row]];
             const std::uint32_t frontier      = sequence.execution_frontier;
             const std::uint32_t max_by_budget = budgets[row].generated_tokens_remaining > 1
                                                     ? budgets[row].generated_tokens_remaining - 1U
                                                     : 0U;
-            const std::uint32_t extent =
+            std::uint32_t extent =
                 std::min({draft_window, max_by_budget, capacity - frontier - 1U});
+            const TokenId* suffix_tokens = nullptr;
+            if (suffix_enabled && sequence.suffix_drafter && sequence.suffix_policy) {
+                const runtime::SuffixDrafter::Proposal proposal =
+                    sequence.suffix_drafter->propose();
+                if (proposal.length > 0) {
+                    const auto decision =
+                        sequence.suffix_policy->decide(proposal.match_length);
+                    switch (decision) {
+                    case runtime::SuffixDraftPolicy::Decision::Warmup:
+                        request.speculative_stats.suffix_reject_warmup += 1;
+                        break;
+                    case runtime::SuffixDraftPolicy::Decision::Floor:
+                        request.speculative_stats.suffix_reject_floor += 1;
+                        break;
+                    case runtime::SuffixDraftPolicy::Decision::Margin:
+                        request.speculative_stats.suffix_reject_margin += 1;
+                        break;
+                    case runtime::SuffixDraftPolicy::Decision::No:
+                    case runtime::SuffixDraftPolicy::Decision::Probe:
+                    case runtime::SuffixDraftPolicy::Decision::Adopt:
+                        break;
+                    }
+                    if (decision == runtime::SuffixDraftPolicy::Decision::Probe ||
+                        decision == runtime::SuffixDraftPolicy::Decision::Adopt) {
+                        const std::uint32_t suffix_extent = std::min(
+                            {proposal.length, draft_window, max_by_budget,
+                             capacity - frontier - 1U});
+                        if (suffix_extent > 0) {
+                            extent               = suffix_extent;
+                            suffix_tokens        = proposal.tokens;
+                            row_suffix_used[row]  = true;
+                            row_suffix_probe[row] =
+                                decision == runtime::SuffixDraftPolicy::Decision::Probe;
+                            row_suffix_match[row] = proposal.match_length;
+                        }
+                    }
+                }
+            }
             dflash_host_ingress->anchors[row] = sequence.ledger.back();
             dflash_host_ingress->execution_frontiers[row] =
                 checked_i32(frontier, "DFlash batch frontier");
@@ -701,6 +818,16 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             dflash_host_ingress->state_source_slots[row] = selectors.source;
             dflash_host_ingress->state_destination_slots[row] = selectors.destination;
             dflash_host_ingress->sampling[row]                = request.sampling_host;
+            dflash_host_ingress->host_proposal_flags[row] =
+                suffix_tokens != nullptr ? 1 : 0;
+            dflash_host_ingress->host_proposal_extents[row] =
+                static_cast<std::int32_t>(suffix_tokens != nullptr ? extent : 0);
+            for (std::uint32_t j = 0; j < kDFlashDecodeMaximumDrafts; ++j) {
+                dflash_host_ingress->host_proposal_tokens[
+                    row * kDFlashDecodeMaximumDrafts + j] =
+                    (suffix_tokens != nullptr && j < extent) ? suffix_tokens[j]
+                                                            : static_cast<TokenId>(0);
+            }
             ensure_sequence_kv_mapped(sequence, frontier + extent + 1U,
                                       backend_kv_cache() ? frontier : 0U);
         }
@@ -759,6 +886,30 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                     request.speculative_stats.accepted_per_position[static_cast<std::size_t>(i)] +=
                         1;
                 }
+            }
+            if (row_suffix_used[row]) {
+                request.speculative_stats.suffix_rounds += 1;
+                request.speculative_stats.suffix_drafted_tokens += extent;
+                request.speculative_stats.suffix_accepted_tokens +=
+                    static_cast<std::uint32_t>(accepted_i);
+                request.speculative_stats.suffix_k_sum += extent;
+                request.speculative_stats.suffix_k_max =
+                    std::max(request.speculative_stats.suffix_k_max, extent);
+                request.speculative_stats.suffix_match_sum += row_suffix_match[row];
+                request.speculative_stats.suffix_match_max =
+                    std::max(request.speculative_stats.suffix_match_max,
+                             row_suffix_match[row]);
+                if (row_suffix_probe[row]) {
+                    request.speculative_stats.suffix_probe_rounds += 1;
+                }
+                if (accepted_i > 0) {
+                    request.speculative_stats.suffix_first_accept += 1;
+                }
+                sequence.suffix_policy->observe_suffix(
+                    static_cast<std::uint32_t>(accepted_i), extent, row_suffix_match[row]);
+            } else if (sequence.suffix_policy) {
+                sequence.suffix_policy->observe_learned(
+                    static_cast<std::uint32_t>(accepted_i), extent);
             }
             sequence.dflash_context_frontier = base_E;
             request.pending                  = PendingCandidate{

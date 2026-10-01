@@ -613,6 +613,19 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                             state_destinations, dflash_rows, envelopes.append);
 
         propose_batch_impl(state, frame, batch_size, k, envelopes);
+        // Zero-parameter suffix-lookup source: rows flagged by the host take their proposal
+        // columns from the ingress host table. The decision is made on device (per-row flags)
+        // so the captured graph stays valid regardless of which rows were flagged this round.
+        {
+            auto* ingress_pod = static_cast<qwen3_5::DFlashDecodeIngress*>(frame.ingress.data);
+            Tensor hflags   = frame.host_proposal_flags.slice(0, 0, batch_size);
+            Tensor hextents = frame.host_proposal_extents.slice(0, 0, batch_size);
+            ops::speculative_apply_host_proposals(
+                hflags, hextents,
+                ingress_pod->host_proposal_tokens.data(),
+                static_cast<std::int32_t>(kDFlashDecodeMaximumDrafts), drafts, extents,
+                state.execution.device.stream);
+        }
         // Target verification consumes row-local KV bases (working-set remap, plan §2.2);
         // the draft model above kept true positions.
         ops::speculative_prepare_verify_inputs(anchors, drafts, verify_bases, extents, verify_ids,
@@ -647,6 +660,9 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                                                    : Tensor{},
                     .proposal_q =
                         frame.proposal_q.data ? frame.proposal_q.slice(2, 0, batch_size) : Tensor{},
+                    .host_proposals = frame.host_proposal_flags.data
+                                          ? frame.host_proposal_flags.slice(0, 0, batch_size)
+                                          : Tensor{},
                     .frontiers       = frontiers,
                     .anchors         = anchors,
                     .licensed_tokens = licensed_tokens,

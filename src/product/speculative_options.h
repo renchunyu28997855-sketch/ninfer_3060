@@ -29,6 +29,24 @@ namespace ninfer::product {
     return "unknown";
 }
 
+// Auto-enablement policy: under the MTP and DFlash backends the zero-parameter
+// suffix draft source is on by default; its per-sequence cost model gates actual
+// use per round, so enabling it costs nothing on workloads where it never pays
+// off. --no-spec-suffix forces it off (baseline A/B runs). The None backend never
+// uses it.
+inline void normalize_speculative_options(SpeculativeOptions& options) {
+    switch (options.backend) {
+    case SpeculativeBackend::Mtp:
+    case SpeculativeBackend::DFlash:
+    case SpeculativeBackend::DFlash2:
+        options.suffix_drafter = !options.no_suffix_drafter;
+        break;
+    case SpeculativeBackend::None:
+        options.suffix_drafter = false;
+        break;
+    }
+}
+
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
     switch (options.backend) {
     case SpeculativeBackend::None:
@@ -41,15 +59,30 @@ inline void validate_speculative_cli_options(const SpeculativeOptions& options) 
         if (options.draft_tokens == 0 || options.draft_tokens > 5) {
             throw std::invalid_argument("--spec mtp requires --draft-tokens in [1,5]");
         }
+        if (options.suffix_drafter &&
+            (options.suffix_min_match < 2 || options.suffix_min_match > options.draft_tokens)) {
+            throw std::invalid_argument(
+                "suffix min-match must be in [2,draft-tokens]");
+        }
         return;
     case SpeculativeBackend::DFlash:
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
             throw std::invalid_argument("--spec dflash requires --draft-tokens in [1,15]");
         }
+        if (options.suffix_drafter &&
+            (options.suffix_min_match < 2 || options.suffix_min_match > options.draft_tokens)) {
+            throw std::invalid_argument(
+                "suffix min-match must be in [2,draft-tokens]");
+        }
         return;
     case SpeculativeBackend::DFlash2:
         if (options.draft_tokens == 0 || options.draft_tokens > 15) {
             throw std::invalid_argument("--spec dflash2 requires --draft-tokens in [1,15]");
+        }
+        if (options.suffix_drafter &&
+            (options.suffix_min_match < 2 || options.suffix_min_match > options.draft_tokens)) {
+            throw std::invalid_argument(
+                "suffix min-match must be in [2,draft-tokens]");
         }
         return;
     }

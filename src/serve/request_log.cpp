@@ -300,6 +300,18 @@ Json speculative_json(const GenerationMetrics& metrics) {
                 {"drafted_tokens", metrics.speculative_draft_tokens},
                 {"accepted_tokens", metrics.speculative_accepted_tokens},
                 {"fallback_steps", metrics.speculative_fallback_steps},
+                {"suffix_rounds", metrics.speculative_suffix_rounds},
+                {"suffix_drafted_tokens", metrics.speculative_suffix_draft_tokens},
+                {"suffix_accepted_tokens", metrics.speculative_suffix_accepted_tokens},
+                {"suffix_k_sum", metrics.speculative_suffix_k_sum},
+                {"suffix_k_max", metrics.speculative_suffix_k_max},
+                {"suffix_probe_rounds", metrics.speculative_suffix_probe_rounds},
+                {"suffix_first_accept", metrics.speculative_suffix_first_accept},
+                {"suffix_match_sum", metrics.speculative_suffix_match_sum},
+                {"suffix_match_max", metrics.speculative_suffix_match_max},
+                {"suffix_reject_warmup", metrics.speculative_suffix_reject_warmup},
+                {"suffix_reject_floor", metrics.speculative_suffix_reject_floor},
+                {"suffix_reject_margin", metrics.speculative_suffix_reject_margin},
                 {"accepted_per_position", metrics.speculative_accepted_per_position}};
 }
 

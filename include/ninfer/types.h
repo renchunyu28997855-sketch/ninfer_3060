@@ -80,6 +80,13 @@ struct SpeculativeOptions {
     // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
+    // Zero-parameter suffix-lookup draft source gated by a per-sequence cost model.
+    // Auto-enabled under --spec mtp|dflash|dflash2 (normalize_speculative_options);
+    // force off with --no-spec-suffix. The None backend never uses it.
+    bool suffix_drafter = false;
+    bool no_suffix_drafter = false;
+    // Minimum matched-suffix length for the suffix source; validated in [2, draft_tokens].
+    std::uint32_t suffix_min_match = 4;
 };
 
 enum class StartupPhase : std::uint8_t {
@@ -739,6 +746,21 @@ struct SpeculativeStats {
     std::uint64_t drafted_tokens  = 0;
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
+    // Suffix-lookup drafter subset of the above (zero-cost source rounds).
+    std::uint64_t suffix_rounds          = 0;
+    std::uint64_t suffix_drafted_tokens  = 0;
+    std::uint64_t suffix_accepted_tokens = 0;
+    // Suffix observability: adopted-window and match-length distributions plus
+    // policy-reject breakdown, for tuning the adoption gate offline.
+    std::uint64_t suffix_k_sum         = 0;  // Σ adopted verify windows
+    std::uint32_t suffix_k_max         = 0;
+    std::uint32_t suffix_probe_rounds  = 0;  // exploratory adoptions
+    std::uint32_t suffix_first_accept  = 0;  // suffix rounds with ≥1 accepted
+    std::uint64_t suffix_match_sum     = 0;
+    std::uint32_t suffix_match_max     = 0;
+    std::uint32_t suffix_reject_warmup = 0;
+    std::uint32_t suffix_reject_floor  = 0;
+    std::uint32_t suffix_reject_margin = 0;
     std::vector<std::uint64_t> accepted_per_position;
 };
 

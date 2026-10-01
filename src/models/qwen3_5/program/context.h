@@ -120,6 +120,7 @@ struct TargetVerifyFrameView {
     Tensor current_extents;
     Tensor candidate_ids;
     Tensor proposal_q;
+    Tensor host_proposals;
     Tensor frontiers;
     Tensor anchors;
     Tensor licensed_tokens;

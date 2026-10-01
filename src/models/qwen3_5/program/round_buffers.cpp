@@ -355,6 +355,10 @@ DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeState
         ingress_tensor(offsetof(DFlashDecodeIngress, state_source_slots), DType::I32, {batch});
     state_destination_slots =
         ingress_tensor(offsetof(DFlashDecodeIngress, state_destination_slots), DType::I32, {batch});
+    host_proposal_flags =
+        ingress_tensor(offsetof(DFlashDecodeIngress, host_proposal_flags), DType::I32, {batch});
+    host_proposal_extents =
+        ingress_tensor(offsetof(DFlashDecodeIngress, host_proposal_extents), DType::I32, {batch});
     sampling = reinterpret_cast<const ops::SamplingConfig*>(
         static_cast<const unsigned char*>(ingress.data) + offsetof(DFlashDecodeIngress, sampling));
     licensed_tokens =

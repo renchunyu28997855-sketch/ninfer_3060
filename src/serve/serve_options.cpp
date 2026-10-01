@@ -113,7 +113,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--kv-working-set N|auto|auto-fair|auto-elastic] [--kv-sink N] [--kv-slot-percentages P0,P1,...] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
-           "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
+           "[--chat-template FILE] [--lm-head-draft] [--no-spec-suffix] [--suffix-min-match N] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy] [--wddm-evictable-budget]\n"
@@ -340,6 +340,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--draft-tokens"), "draft-tokens"));
+        } else if (arg == "--no-spec-suffix") {
+            options.speculative.no_suffix_drafter = true;
+        } else if (arg == "--suffix-min-match") {
+            options.speculative.suffix_min_match = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--suffix-min-match"), "suffix-min-match"));
         } else if (arg == "--default-max-tokens") {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");
@@ -491,6 +496,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
+    product::normalize_speculative_options(options.speculative);
     product::validate_speculative_cli_options(options.speculative);
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {

@@ -1670,5 +1670,20 @@ void ProgramImpl::ordered_reset(SequenceState& sequence) {
     sequence.dflash_context_frontier = 0;
 }
 
+void ProgramImpl::seed_suffix_drafter(SequenceState& sequence) {
+    if (!suffix_drafter) { return; }
+    if (!sequence.suffix_drafter) {
+        sequence.suffix_drafter.emplace(suffix_min_match, draft_window);
+        sequence.suffix_policy.emplace();
+    }
+    sequence.suffix_drafter->rebuild(std::span<const TokenId>(sequence.ledger));
+}
+
+void ProgramImpl::append_suffix_tokens(SequenceState& sequence,
+                                       std::span<const TokenId> tokens) {
+    if (!suffix_drafter || !sequence.suffix_drafter) { return; }
+    for (const TokenId token : tokens) { sequence.suffix_drafter->append(token); }
+}
+
 
 } // namespace ninfer::models::qwen3_5::detail

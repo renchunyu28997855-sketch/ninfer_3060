@@ -78,6 +78,9 @@ struct SequencePlanningInputs {
     std::uint32_t prefill_chunk             = 0;
     std::uint32_t draft_window              = 0;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
+    // Zero-parameter suffix-lookup draft source (auto-enabled under mtp|dflash|dflash2).
+    bool suffix_drafter                    = false;
+    std::uint32_t suffix_min_match         = 4;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
     models::LoadOptions features;
@@ -110,6 +113,9 @@ struct SequencePlanImpl {
     std::uint32_t prefill_chunk             = 0;
     std::uint32_t draft_window              = 0;
     SpeculativeBackend speculative_backend  = SpeculativeBackend::None;
+    // Zero-parameter suffix-lookup draft source (auto-enabled under mtp|dflash|dflash2).
+    bool suffix_drafter                    = false;
+    std::uint32_t suffix_min_match         = 4;
     KvCacheStorage kv_storage               = KvCacheStorage::BFloat16;
     ProposalHead proposal_head              = ProposalHead::Full;
     models::LoadOptions features;

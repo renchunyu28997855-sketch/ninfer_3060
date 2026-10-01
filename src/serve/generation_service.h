@@ -38,6 +38,19 @@ struct GenerationMetrics {
     std::uint64_t speculative_draft_tokens    = 0;
     std::uint64_t speculative_accepted_tokens = 0;
     std::uint64_t speculative_fallback_steps  = 0;
+    // Suffix-lookup drafter subset of the above (zero-cost source rounds).
+    std::uint64_t speculative_suffix_rounds      = 0;
+    std::uint64_t speculative_suffix_draft_tokens    = 0;
+    std::uint64_t speculative_suffix_accepted_tokens = 0;
+    std::uint64_t speculative_suffix_k_sum       = 0;  // Σ adopted verify windows
+    std::uint32_t speculative_suffix_k_max       = 0;
+    std::uint32_t speculative_suffix_probe_rounds = 0;  // exploratory adoptions
+    std::uint32_t speculative_suffix_first_accept = 0; // suffix rounds with ≥1 accepted
+    std::uint64_t speculative_suffix_match_sum   = 0;
+    std::uint32_t speculative_suffix_match_max   = 0;
+    std::uint32_t speculative_suffix_reject_warmup = 0;
+    std::uint32_t speculative_suffix_reject_floor  = 0;
+    std::uint32_t speculative_suffix_reject_margin = 0;
     std::vector<std::uint64_t> speculative_accepted_per_position;
     std::uint32_t prefix_cache_hit_tokens     = 0;
     ninfer::PrefixReusePath prefix_reuse_path = ninfer::PrefixReusePath::Root;
