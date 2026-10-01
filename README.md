@@ -19,7 +19,7 @@ sm_86 架构门、GA106 48KB 静态共享内存上限适配、nvfp4/fp8-w4a4 编
 | `bench/`, `eval/` | 基准与评测工具 |
 | `docs/` | 产品与维护者文档；`docs/ARTIFACT_NOTES.md` 为本分支特有的工件溯源说明；`docs/conversion/` 为模型转换文档集（含自 sister 仓库归档的 4 篇） |
 | `models/` | 修改后的 `.ninfer` 制品本地存放目录（制品不入库，见 `models/README.md`） |
-| `dist/apps/` | 预编译交付物（3 exe + 9 DLL，**不入库**；从 `E:\download\123\ninfer-3060-win\bin\` 拷入，启动器默认扫描此目录） |
+| `dist/apps/` | 预编译交付物（3 exe + 9 DLL，**不入库**，已随工作树配齐；启动器默认扫描此目录） |
 | `scripts/` | Windows 构建驱动（开发机）：`build_sm86.bat`(交付构建) 等 |
 | `tools/splice_ternary.py` | 从 GGUF 重建三值化核心的离线脚本（工件再生用） |
 
@@ -27,10 +27,11 @@ sm_86 架构门、GA106 48KB 静态共享内存上限适配、nvfp4/fp8-w4a4 编
 
 ## 快速开始（3060 机器）
 
-1. 取预编译包（本仓库外）：`E:\download\123\ninfer-3060-win\bin\`
+1. 预编译包：工作树内 `dist/apps/`（不入库，已随树配齐）
    - `ninfer.exe` / `ninfer-serve.exe` / `ninfer-perplexity.exe`
    - 随包 ffmpeg DLL ×7 + `nvcudart_hybrid64.dll`（必须与 exe 同目录）
-2. 模型工件（9.5GB，不入库）：`E:\download\123\model\Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer`
+2. 模型工件（不入库，放 `models/`）：`models\Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer`
+   或 `models\Swift-Bonsai-2-ninfer-v3-aux.ninfer`（见 `models/README.md`）
 3. 运行：
    ```bat
    ninfer.exe <model.ninfer> --prompt "你好" --max-context 8192
@@ -77,10 +78,10 @@ cmake --build build_86 -j 8
 托管 ninfer-serve.exe 启停、实时日志、参数表单（读写 `app/config.json`）、基准/案例测试页。
 
 ```bat
-:: 依赖 Python 3.12 + PyQt6 + requests（本机已装于 ...
-:: C:\Users\sanbanfu\AppData\Local\Programs\Python\Python312）
-cd E:\<repo>
-start "" "C:\Users\sanbanfu\AppData\Local\Programs\Python\Python312\pythonw.exe" app\ninfer_launcher.pyw
+:: 依赖 Python 3.12 + PyQt6 + requests
+:: 双击 app\ninfer_launcher.pyw 即自动走 pythonw（文件关联）；命令行方式：
+cd /d <本仓库路径>
+start "" py -3 app\ninfer_launcher.pyw
 ```
 
 界面选引擎 exe（自动扫描 `dist/apps/`、`build*/apps/`、`*/bin/`；exe 旁需同放 DLL）

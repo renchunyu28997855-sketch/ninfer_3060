@@ -14,6 +14,12 @@
 
 ### 本地已有工件
 
+- **`Swift-Bonsai-2-ninfer-v3-aux.ninfer`**（8,307,236,592 B）
+  - Qwen3.8-27B 基座（Swift Bonsai 2），v3 容器 + hadamard 符号 aux 对象；
+    符号元数据见 `pack-tools/swift-bonai2-hadamard-meta.json`。
+  - quick PPL（本树 sm_120a 开发构建，261,167 tokens）：overall **5.713**
+    （中文 8.066 / 英文长文 8.772 / 英文参考 7.895 / 代码 1.89）。
+
 - **`Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer`**（若存在）
   - 大小：**9,520,051,456 B**
   - SHA-256：`6d8b62b589cfc57736b515f4dc13e7c5c06c09a726ceee3628ac20a86d8aa883`
@@ -53,8 +59,7 @@ start "" "%LOCALAPPDATA%\Programs\Python\Python312\pythonw.exe" app\ninfer_launc
 ```
 
 **注意**：exe 旁的 9 个依赖 DLL（ffmpeg ×8 + nvcudart_hybrid64.dll）必须与 exe 同目录，
-缺失时进程以 0xC0000061 静默启动失败。`dist/apps/` 已随包配齐（该目录不入库，从
-`E:\download\123\ninfer-3060-win\bin\` 拷贝）。
+缺失时进程以 0xC0000061 静默启动失败。`dist/apps/` 已随工作树配齐（该目录不入库）。
 
 ## 没有 spliced 件时如何重建
 

@@ -5,13 +5,13 @@
 官方交付的 `Ternary-Bonsai-2-27B-ninfer-v3.ninfer` 中，**三值化 (t2_g128_fp16)
 对象的数据损坏/错位**：按其声明几何解码出的 embedding 与 GGUF 源不符，引擎端
 PPL 恒 ~16.3（近随机）。引擎几何与作者打包器规范一致，问题不在引擎。
-交付请使用 **spliced** 工件（本机
-`E:\download\123\model\Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer`，
-9,520,051,456 B，未入库——9.5GB）。
+交付请使用 **spliced** 工件（本树
+`models\Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer`，
+9,520,051,456 B，不入库）。
 
 ## 格式规范（权威来源）
 
-- 打包器：`E:\download\123\model\tools\pack.py`（"M1-D packer"，958 行）。
+- 打包器：`models\pack-tools\tools\pack.py`（"M1-D packer"，958 行）。
   `assemble_ternary` (ln≈305)：每行先写 **codes 平面**
   (`base_offset + i*base_row_bytes + sel*32` ← GGUF blk[2:34])，再写
   **scales 平面** (`scale_offset + i*80 + sel*2`，fp16 LE ← blk[0:2])；

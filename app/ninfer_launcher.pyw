@@ -1,4 +1,4 @@
-#!C:\Users\sanbanfu\AppData\Local\Programs\Python\Python312\pythonw.exe
+# 无 shebang：双击经 .pyw -> pythonw 文件关联启动；命令行用 `py -3 app\ninfer_launcher.pyw`（需 Python 3.12 + PyQt6）
 # -*- coding: utf-8 -*-
 """
 NInfer Launcher — 本地 PyQt6 启动器，用于管理 NInfer 推理服务器。

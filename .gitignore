@@ -16,3 +16,10 @@ build_incr.log
 build_incr_tmp.bat
 rebuild_120a.log
 serve_*.log
+
+# dev-session noise
+build_86/
+ppl_*.log
+ws_*.log
+.decode_diff.txt
+.pi/

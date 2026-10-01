@@ -1,8 +1,9 @@
 """Surgical re-pack of the ternary (t2_g128_fp16) core of the v3 artifact.
 
-Base file   : E:\download\123\model\Ternary-Bonsai-2-27B-ninfer-v3-fixed.ninfer
-              (author's file, with the 3 hadamard-sign aux objects fixed to bf16 +-1)
-Output      : E:\download\123\model\Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer
+Base file   : models/Ternary-Bonsai-2-27B-ninfer-v3-fixed.ninfer
+              (author's file, with the 3 hadamard-sign aux objects fixed to bf16 +-1;
+               源文件已移出本树，需重新获取后放 models/)
+Output      : models/Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer
 
 Every object whose layout is row-split-k128-v1 (the PQ2_0 ternary objects) is
 re-generated from the GGUF via pack.py's own producers (byte-exact plane
@@ -17,9 +18,12 @@ import struct
 import sys
 import types
 
-GGUF = r"E:\download\123\model\Ternary-Bonsai-2-27B-PQ2_0(1).gguf"
-SRC = r"E:\download\123\model\Ternary-Bonsai-2-27B-ninfer-v3-fixed.ninfer"
-DST = r"E:\download\123\model\Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer"
+# 源文件（官方 v3 件 + GGUF）已不在本树内，需重新获取后放 models/ 下；
+# spliced 输出件在 models/ 已存在时可直接跳过本脚本。
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GGUF = os.path.join(REPO_ROOT, "models", "Ternary-Bonsai-2-27B-PQ2_0.gguf")
+SRC = os.path.join(REPO_ROOT, "models", "Ternary-Bonsai-2-27B-ninfer-v3-fixed.ninfer")
+DST = os.path.join(REPO_ROOT, "models", "Ternary-Bonsai-2-27B-ninfer-v3-spliced.ninfer")
 
 # --- import pack.py without running its template requirement --------------
 stub_torch = types.ModuleType("torch")
@@ -30,8 +34,7 @@ for _a in ("bfloat16","float32","int32","int64","float16","uint8","int8","float6
     setattr(stub_torch, _a, _T)
 sys.modules.setdefault("torch", stub_torch)
 
-sys.path.insert(0, r"E:\download\123\ninfer-ternary-bonsai-ada-master")
-sys.path.insert(0, r"E:\download\123\model\tools")
+sys.path.insert(0, os.path.join(REPO_ROOT, "models", "pack-tools", "tools"))
 import pack  # noqa: E402
 
 # --- shipped dir -----------------------------------------------------------
